@@ -7,7 +7,7 @@ import asyncio, logging, sys, time
 from aiohttp import web
 from telethon.errors import FloodWaitError
 from session_manager import SessionManager
-from scraper import is_post
+from scraper import is_post, why_not_post
 from flow import process_post, state, Abort
 import commands, db as DB
 import botapi
@@ -116,7 +116,7 @@ async def scrape_loop(client):
                     state.abort = False
                     break
                 if not is_post(msg):
-                    log.info("skip msg %s (not a post)", msg.id)
+                    log.info("skip msg %s (%s)", msg.id, why_not_post(msg))
                     await DB.set_progress(target, msg.id)
                     continue
                 log.info("POST FOUND: msg %s — starting download flow", msg.id)

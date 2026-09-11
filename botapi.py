@@ -204,11 +204,23 @@ def register(scrape_client):
         parts = ev.raw_text.split()
         cfg = await DB.get_config()
         tid = cfg.get("target_id")
-        if len(parts) != 2 or not parts[1].lstrip("-").isdigit() or not tid:
-            await ev.reply("Usage: /goto <message_id> — e.g. /goto 120\n"
-                           "Scraping will start from that message (use /lastpost to see ids).")
+        if len(parts) != 2 or not tid:
+            await ev.reply("Usage: /goto <message_id> or /goto https://t.me/c/<channel>/<msg>")
             return
-        mid = int(parts[1])
+        arg = parts[1]
+        if arg.lstrip("-").isdigit():
+            mid = int(arg)
+        else:
+            from scraper import parse_private_link
+            chat_id, mid = parse_private_link(arg)
+            if not mid:
+                await ev.reply("Couldn't parse that. Send a message id (e.g. /goto 120) "
+                               "or a message link like https://t.me/c/2514892126/120")
+                return
+            if chat_id != tid:
+                await ev.reply(f"⚠️ That link is for channel {chat_id}, but your target is {tid}. "
+                               "Fix with /target first.")
+                return
         await DB.set_progress(tid, mid - 1)  # loop uses min_id=last_id -> starts AT mid
         state._last_scan = None
         await ev.reply(f"📌 Resume point set to message {mid}. /start or /resume to go.")
