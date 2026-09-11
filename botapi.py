@@ -10,7 +10,8 @@ from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_USER_ID
 import db as DB
 from flow import state
 
-bot = TelegramClient(MemorySession(), API_ID, API_HASH)
+bot = None  # created lazily inside start() — creating a client at import time
+# crashes on Python 3.14 ("no current event loop in thread 'MainThread'")
 
 _CMDS = [
     ("ping",     "Check the bot is alive"),
@@ -153,6 +154,8 @@ def register(scrape_client):
 
 
 async def start(scrape_client):
+    global bot
+    bot = TelegramClient(MemorySession(), API_ID, API_HASH)
     await bot.start(bot_token=BOT_TOKEN)
     register(scrape_client)
     await _menu()
