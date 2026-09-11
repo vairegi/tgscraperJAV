@@ -19,6 +19,8 @@ DB_NAME = os.environ.get("MONGO_DB", "tgscraper")
 WAIT_BOT_REPLY = int(os.environ.get("WAIT_BOT_REPLY", "20"))      # wait for Fubuki/Rias reply
 WAIT_BYPASS_REPLY = int(os.environ.get("WAIT_BYPASS_REPLY", "60"))# wait for bypass group tag
 POLL_INTERVAL = 1.5
+STEP_DELAY = float(os.environ.get("STEP_DELAY", "2"))    # pause between workflow steps
+POST_DELAY = float(os.environ.get("POST_DELAY", "10"))   # pause between posts
 
 # Health-check server
 PORT = int(os.environ.get("PORT", "10000"))  # Render injects PORT

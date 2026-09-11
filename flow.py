@@ -3,7 +3,7 @@ Download -> Fubuki Short link -> bypass group Open link -> Fubuki final link
 -> Rias bot videos+srt -> cover post + media to DB channel."""
 import asyncio, time
 from config import (BTN_DOWNLOAD, BTN_SHORT_LINK, BTN_OPEN_LINK, FUBUKI_BOT,
-                    WAIT_BOT_REPLY, WAIT_BYPASS_REPLY, POLL_INTERVAL)
+                    WAIT_BOT_REPLY, WAIT_BYPASS_REPLY, POLL_INTERVAL, STEP_DELAY)
 from scraper import find_button, parse_tg_start, first_url, norm
 import db as DB
 import forwarder
@@ -91,6 +91,8 @@ async def process_post(client, cfg, msg):
     base_f = await _last_id(client, FUBUKI_BOT)
     await _follow_button(msg, BTN_DOWNLOAD, client)
 
+    await asyncio.sleep(STEP_DELAY)
+
     # 2) Fubuki sends the linked message (Short link button) — or a link in
     #    text; if it answered with the generic welcome, re-send /start once
     state.stage = "waiting Fubuki short-link message"
@@ -125,6 +127,8 @@ async def process_post(client, cfg, msg):
     if not short_link:
         raise RuntimeError("could not capture short link")
 
+    await asyncio.sleep(STEP_DELAY)
+
     # 4) send the link to the bypass group; wait for the tagged 'Open link' reply
     state.stage = "waiting bypass group Open link"
     sent = await client.send_message(bypass, short_link)
@@ -132,13 +136,12 @@ async def process_post(client, cfg, msg):
 
     # 5) click 'Open link' -> deep link back into Fubuki
     state.stage = "clicking Open link"
-    res, b = await _follow_button(bm, BTN_OPEN_LINK, client)
-    open_url = getattr(b, "url", None) or (res if isinstance(res, str) else None)
+    # _follow_button already follows tg deep links (sends /start <payload>)
+    # exactly ONCE — no second send here, that caused the double-link bug.
     base_f = await _last_id(client, FUBUKI_BOT)
-    if open_url:
-        bot, payload = parse_tg_start(open_url)
-        if bot:
-            await client.send_message(bot, f"/start {payload}" if payload else "/start")
+    await _follow_button(bm, BTN_OPEN_LINK, client)
+
+    await asyncio.sleep(STEP_DELAY)
 
     # 6) Fubuki replies 'Here is your link https://t.me/Rias...?start=...'
     state.stage = "waiting Fubuki final link"
@@ -146,6 +149,8 @@ async def process_post(client, cfg, msg):
     bot, payload = parse_tg_start(fm2.text)
     if not bot:
         raise RuntimeError("no t.me start link in Fubuki final message")
+
+    await asyncio.sleep(STEP_DELAY)
 
     # 7) open Rias bot -> collect video(s) + .srt
     state.stage = f"collecting media from @{bot}"

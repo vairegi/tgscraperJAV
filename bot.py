@@ -140,7 +140,8 @@ async def scrape_loop(client):
                     await DB.set_progress(target, msg.id)
                 state.current_post = None
                 state.stage = "idle"
-                await asyncio.sleep(3)
+                from config import POST_DELAY
+                await asyncio.sleep(POST_DELAY)  # pacing: one post at a time, ban-safe
             if state.stage != "watching for new posts":
                 log.info("scan pass complete (caught up to latest message); watching for new posts")
                 state.stage = "watching for new posts"
