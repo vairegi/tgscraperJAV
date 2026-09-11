@@ -2,6 +2,7 @@
 command menu. Menu commands are no-argument; IDs are added via the setup
 wizard: tap /target -> the bot asks for the id -> you send it -> saved.
 Only ADMIN_USER_ID (your numeric Telegram id) can use it."""
+import asyncio
 from telethon import TelegramClient, events, Button
 from telethon.sessions import MemorySession
 from telethon.tl.functions.bots import SetBotCommandsRequest
@@ -10,7 +11,11 @@ from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_USER_ID
 import db as DB
 from flow import state
 
-bot = TelegramClient(MemorySession(), API_ID, API_HASH)
+# Event loop creation for Python 3.14+
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+bot = TelegramClient(MemorySession(), API_ID, API_HASH, loop=loop)
 
 _CMDS = [
     ("target",   "Set target channel (wizard)"),
