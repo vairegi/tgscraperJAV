@@ -1,0 +1,117 @@
+"""bot.py — entry point: session, commands, health server, main scrape loop."""
+import asyncio, logging
+from aiohttp import web
+from session_manager import SessionManager
+from scraper import is_post
+from flow import process_post, state, Abort
+import commands, db as DB
+import botapi
+
+
+def _fmt_ts(ts):
+    import time
+    return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(ts))
+
+
+async def fmt_progress():
+    s = await DB.get_stats()
+    cfg = await DB.get_config()
+    tid = cfg.get("target_id")
+    last = await DB.get_progress(tid) if tid else 0
+    last_post = await DB.get_last_post(tid) if tid else None
+    fails = await DB.get_failures(5)
+    lines = [
+        "\U0001F4CA PROGRESS",
+        f"\U0001F4CD Stage: {state.stage}",
+        f"\U0001F4C4 Current post: {state.current_post}",
+        f"\u2705 Last scraped post: {last_post}",
+        f"\u23ED Next resume point (msg id): {last}",
+        f"\U0001F4C1 Posts scraped: {s.get('posts_done', 0)}",
+        f"\U0001F3AC Videos sent: {s.get('videos_sent', 0)}",
+        f"\U0001F4AC SRT sent: {s.get('srt_sent', 0)}",
+        f"\u274C Failures: {s.get('failures', 0)}",
+    ]
+    if fails:
+        lines.append("— Recent failures —")
+        for f in fails:
+            lines.append(f"\u2022 post {f['post_id']} @ {f['stage']}: {f['reason']} ({_fmt_ts(f['ts'])})")
+    return "\n".join(lines)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("tgscraper")
+
+async def health(_):
+    return web.json_response({"ok": True, "stage": state.stage,
+                              "running": state.running, "post": state.current_post})
+
+async def start_health_server(port):
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", port).start()
+    log.info("health server on :%s", port)
+
+async def scrape_loop(client):
+    """Continuously scan target channel oldest->newest, processing real posts."""
+    while True:
+        await asyncio.sleep(3)
+        if state.abort or state.paused:
+            continue
+        cfg = await DB.get_config()
+        if not all(cfg.get(k) for k in ("target_id", "bypass_id", "db_id")):
+            continue  # not configured yet
+        state.running = True
+        target = cfg["target_id"]
+        last_id = await DB.get_progress(target)
+        try:
+            async for msg in client.iter_messages(target, min_id=last_id, reverse=True):
+                while state.paused and not state.abort:
+                    await asyncio.sleep(2)
+                if state.abort:
+                    state.abort = False
+                    break
+                if not is_post(msg):
+                    await DB.set_progress(target, msg.id)
+                    continue
+                state.current_post = msg.id
+                try:
+                    await process_post(client, cfg, msg)
+                    await DB.set_progress(target, msg.id)
+                    log.info("post %s done", msg.id)
+                except Abort:
+                    await DB.add_failure(msg.id, state.stage, "skipped by user")
+                    await DB.set_progress(target, msg.id)
+                    state.abort = False
+                except Exception as e:
+                    log.exception("post %s failed", msg.id)
+                    await DB.add_failure(msg.id, state.stage, e)
+                    await DB.set_progress(target, msg.id)  # move on, don't get stuck
+                state.current_post = None
+                state.stage = "idle"
+                await asyncio.sleep(3)  # gentle pacing between posts
+        except Exception as e:
+            log.exception("scrape loop error")
+            await asyncio.sleep(15)
+
+async def main():
+    from config import PORT
+    sm = SessionManager()
+    client = await sm.start()
+    me = await client.get_me()
+    log.info("logged in as %s (%s)", me.first_name, me.id)
+    commands.register(client)
+    await start_health_server(PORT)
+    tasks = [scrape_loop(client), client.run_until_disconnected()]
+    if __import__("config").BOT_TOKEN:
+        ctl = await botapi.start(client)
+        me_b = await ctl.get_me()
+        log.info("control bot @%s online (command menu registered)", me_b.username)
+        tasks.append(ctl.run_until_disconnected())
+    else:
+        log.info("BOT_TOKEN not set — control bot/menu disabled, userbot commands still work")
+    await asyncio.gather(*tasks)
+
+if __name__ == "__main__":
+    asyncio.run(main())
