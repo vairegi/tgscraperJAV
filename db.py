@@ -54,3 +54,7 @@ async def set_last_post(target_id, post_id):
 async def get_last_post(target_id):
     doc = await db().progress.find_one({"_id": str(target_id)})
     return (doc or {}).get("last_post")
+
+async def reset_progress(target_id):
+    """Clear progress + last_post for a target (next scan starts from msg 1)."""
+    await db().progress.delete_one({"_id": str(target_id)})

@@ -1,24 +1,23 @@
-TGSCRAPER v3.2 PATCH — 3 changed files only
+TGSCRAPER v3.3 PATCH — 2 changed files only
 ===========================================
-Overwrite these files in your repo root, push, and Render redeploys:
+Overwrite in repo root, push, Render redeploys:
 
-  1. bot.py     — FIX (MAIN): scraper now runs ONLY after /start (new
-                  state.started gate) — before, /start didn't actually arm
-                  the loop. FIX: userbot command replies DISABLED (bot-only
-                  replies, no more double answers). FIX: verbose Render logs
-                  (scraper ACTIVE / POST FOUND / post N done / scan pass
-                  complete / waiting config) so the log is never silent.
-                  Catch-up pass now polls every 30s instead of log-spamming.
-  2. botapi.py  — FIX: /start refuses with a clear message if target/bypass/
-                  db not set. /stop fully stops (started=False). Wizard no
-                  longer eats your next /command as an ID.
-  3. flow.py    — adds state.started flag.
+  1. botapi.py — NEW /reset   : clears progress -> next scan starts from POST 1
+                 NEW /goto <id>: start scraping from a specific message id
+                 /lastpost now shows channel overview: messages scanned,
+                 newest post id, caption, Download button check, AND your
+                 current resume point (so you can see the mismatch yourself).
+                 Command menu updated (now 15 commands).
+  2. db.py     — adds reset_progress() helper.
 
-USAGE (control bot @scrapjavbot):
-  /ping -> /target -> send id -> /bypass -> send id -> /adddb -> send id
-  -> /start -> watch Render logs + /progress
+WHY THE BOT WAS "WAITING FOR NEW POSTS":
+Your Mongo already had progress saved at message 346 (from the earlier buggy
+runs), and your channel's newest message is ~346 — so the scraper correctly
+resumed past the end. It was standing at the finish line, not broken.
 
-NOTE: Mongo progress from the old buggy run may be polluted (e.g. if the
-wizard ever swallowed "/start" as a text value). If scraping looks stuck at
-a weird message id, just tell me — one command (/reset) can clear it, or
-delete the 'progress' collection in Atlas.
+FIX ON YOUR SIDE (10 seconds):
+  In @scrapjavbot send:  /reset     then   /start
+  -> Render log will show: scanning target ... from message id 0
+  -> it will now process post 1, 2, 3 ... (150+ posts)
+To start from a specific post instead: /goto <message_id> then /start.
+Use /lastpost to see real message ids in the channel.

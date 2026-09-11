@@ -27,6 +27,8 @@ _CMDS = [
     ("progress", "Stats, last post, failure reasons"),
     ("skip",     "Skip current post"),
     ("stop",     "Stop the scraper"),
+    ("reset",    "Reset progress — scrape from post 1"),
+    ("goto",     "Start from a specific message id"),
 ]
 
 _pending = {}
@@ -95,6 +97,28 @@ def register(scrape_client):
             return
         from scraper import is_post, find_button
         from config import BTN_DOWNLOAD
+        total = 0
+        newest = None
+        async for m0 in scrape_client.iter_messages(cfg["target_id"], limit=500):
+            total += 1
+            if newest is None and is_post(m0):
+                newest = m0
+        resume_at = await DB.get_progress(cfg["target_id"])
+        if newest:
+            m = newest
+            btn = find_button(m, BTN_DOWNLOAD)
+            cap = (m.message or "")[:200].replace("\n", " ")
+            await ev.reply("📄 Target channel overview\n• messages scanned: " + str(total)
+                           + "\n• newest post msg id: " + str(m.id)
+                           + "\n• date: " + m.date.strftime("%Y-%m-%d %H:%M UTC")
+                           + "\n• caption: " + cap
+                           + "\n• Download button: " + ("yes — " + btn[2].text if btn else "NO")
+                           + "\n• current resume point: " + str(resume_at)
+                           + "\n\nTip: /reset to scrape from post 1, /goto <id> to start elsewhere.")
+            return
+        await ev.reply("Scanned " + str(total) + " messages — none look like posts "
+                       "(photo+caption+Download button). Check the channel or button text.")
+        return
         async for m in scrape_client.iter_messages(cfg["target_id"], limit=30):
             if is_post(m):
                 btn = find_button(m, BTN_DOWNLOAD)
@@ -158,6 +182,36 @@ def register(scrape_client):
         if _admin(ev.sender_id):
             state.abort = True; state.running = False; state.started = False
             await ev.reply("🛑 Stopped. Progress saved — /resume or /start continues from the same post.")
+
+    @bot.on(events.NewMessage(pattern=r"^/reset$"))
+    async def reset_cmd(ev):
+        if not _admin(ev.sender_id):
+            return
+        cfg = await DB.get_config()
+        tid = cfg.get("target_id")
+        if not tid:
+            await ev.reply("Set the target first: /target")
+            return
+        await DB.reset_progress(tid)
+        state._last_scan = None
+        await ev.reply("♻️ Progress reset for the target channel.\n"
+                       "Next scan starts from POST 1. Use /start (or /resume) to begin.")
+
+    @bot.on(events.NewMessage(pattern=r"^/goto\b"))
+    async def goto_cmd(ev):
+        if not _admin(ev.sender_id):
+            return
+        parts = ev.raw_text.split()
+        cfg = await DB.get_config()
+        tid = cfg.get("target_id")
+        if len(parts) != 2 or not parts[1].lstrip("-").isdigit() or not tid:
+            await ev.reply("Usage: /goto <message_id> — e.g. /goto 120\n"
+                           "Scraping will start from that message (use /lastpost to see ids).")
+            return
+        mid = int(parts[1])
+        await DB.set_progress(tid, mid - 1)  # loop uses min_id=last_id -> starts AT mid
+        state._last_scan = None
+        await ev.reply(f"📌 Resume point set to message {mid}. /start or /resume to go.")
 
 
 async def start(scrape_client):
