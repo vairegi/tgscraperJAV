@@ -1,17 +1,28 @@
 """scraper.py — smart post detection + button/link helpers.
-v4: post = has media (photo OR spoiler OR any attachment) + caption + inline
-buttons incl. 'Download'. Spoiler images arrive as documents/web-preview, not
-plain photos — the old photo-only check skipped every real post."""
+v5: Unicode-normalized button matching — channel/bot buttons use Mathematical
+Bold Sans-Serif (e.g. '𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱'), which never matches plain 'download'.
+NFKD folds all fancy-font variants (bold/italic/serif/mono/fullwidth) to ASCII,
+so Download / Short link / Open link match everywhere regardless of styling."""
 import re
+import unicodedata
 from config import BTN_DOWNLOAD
 
 
+def norm(text):
+    """Fold fancy Unicode fonts (𝗯𝗼𝗹𝗱, 𝘪𝘵𝘢𝘭𝘪𝘤, ｆｕｌｌｗｉｄｔｈ...) to
+    lowercase ASCII-ish text for matching. Emoji and symbols are kept but
+    ignored by 'in' matching on plain needles."""
+    if not text:
+        return ""
+    return unicodedata.normalize("NFKD", text).lower()
+
+
 def find_button(msg, needle):
-    """Return (row, col, button) whose text CONTAINS needle (case-insensitive)."""
-    needle = needle.lower()
+    """Return (row, col, button) whose normalized text CONTAINS the needle."""
+    needle = norm(needle)
     for r, row in enumerate(msg.buttons or []):
         for c, b in enumerate(row):
-            if needle in (getattr(b, "text", "") or "").lower():
+            if needle in norm(getattr(b, "text", "")):
                 return r, c, b
     return None
 

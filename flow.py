@@ -4,7 +4,7 @@ Download -> Fubuki Short link -> bypass group Open link -> Fubuki final link
 import asyncio, time
 from config import (BTN_DOWNLOAD, BTN_SHORT_LINK, BTN_OPEN_LINK, FUBUKI_BOT,
                     WAIT_BOT_REPLY, WAIT_BYPASS_REPLY, POLL_INTERVAL)
-from scraper import find_button, parse_tg_start, first_url
+from scraper import find_button, parse_tg_start, first_url, norm
 import db as DB
 import forwarder
 
@@ -36,7 +36,7 @@ async def _wait_new(client, entity, after_id, timeout, need_button=None, need_te
         for m in sorted([m for m in msgs if m and m.id > after_id], key=lambda x: x.id):
             if need_button and not find_button(m, need_button):
                 continue
-            if need_text and need_text.lower() not in (m.text or "").lower():
+            if need_text and norm(need_text) not in norm(m.text):
                 continue
             return m
         await asyncio.sleep(POLL_INTERVAL)
