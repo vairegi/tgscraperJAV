@@ -130,9 +130,19 @@ async def scrape_loop(client):
                     await DB.set_progress(target, msg.id)
                     state.abort = False
                 except FloodWaitError as e:
-                    # Telegram rate-limit mid-scrape: sleep in-process, retry SAME post
-                    log.warning("scrape FloodWait %ds on post %s — sleeping", e.seconds, msg.id)
-                    await asyncio.sleep(e.seconds + 5)
+                    # Telegram rate-limit mid-scrape: sleep in-process, retry SAME post.
+                    # If the wait is huge, park paused instead of burning a long sleep.
+                    from config import FLOOD_MAX_WAIT, FLOOD_PARK
+                    if e.seconds > FLOOD_MAX_WAIT:
+                        state.paused = True
+                        log.warning("FloodWait %ds on post %s exceeds cap %ds — PAUSING scraper for %ds "
+                                    "(it auto-resumes after; progress already saved)", e.seconds, msg.id,
+                                    FLOOD_MAX_WAIT, FLOOD_PARK)
+                        await asyncio.sleep(FLOOD_PARK)
+                        state.paused = False
+                    else:
+                        log.warning("scrape FloodWait %ds on post %s — sleeping", e.seconds, msg.id)
+                        await asyncio.sleep(e.seconds + 5)
                     continue
                 except Exception as e:
                     log.exception("post %s failed", msg.id)

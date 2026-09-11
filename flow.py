@@ -164,6 +164,8 @@ async def process_post(client, cfg, msg):
     if not vids and not srts:
         raise RuntimeError("bot sent no videos/srt")
 
+    await asyncio.sleep(STEP_DELAY)
+
     # 8) DB channel: cover post FIRST, then videos + srt
     state.stage = "sending cover post to DB"
     await forwarder.send_cover(client, target, msg, dbc)
