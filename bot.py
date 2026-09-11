@@ -89,14 +89,25 @@ async def scrape_loop(client):
     redeploy resumes from the exact same post."""
     while True:
         await asyncio.sleep(3)
-        if state.abort or state.paused:
+        if not state.started or state.paused:
+            state.running = False
             continue
         cfg = await DB.get_config()
-        if not all(cfg.get(k) for k in ("target_id", "bypass_id", "db_id")):
+        missing = [k for k in ("target_id", "bypass_id", "db_id") if not cfg.get(k)]
+        if missing:
+            state.running = False
+            if state.stage != "waiting config":
+                log.warning("started but config missing: %s — set via control bot", missing)
+                state.stage = "waiting config"
             continue
+        if not state.running:
+            log.info("scraper ACTIVE — target=%s bypass=%s db=%s", cfg["target_id"], cfg["bypass_id"], cfg["db_id"])
         state.running = True
         target = cfg["target_id"]
         last_id = await DB.get_progress(target)
+        if getattr(state, "_last_scan", None) != (target, last_id):
+            log.info("scanning target %s from message id %s (oldest -> newest)", target, last_id)
+            state._last_scan = (target, last_id)
         try:
             async for msg in client.iter_messages(target, min_id=last_id, reverse=True):
                 while state.paused and not state.abort:
@@ -105,8 +116,10 @@ async def scrape_loop(client):
                     state.abort = False
                     break
                 if not is_post(msg):
+                    log.info("skip msg %s (not a post)", msg.id)
                     await DB.set_progress(target, msg.id)
                     continue
+                log.info("POST FOUND: msg %s — starting download flow", msg.id)
                 state.current_post = msg.id
                 try:
                     await process_post(client, cfg, msg)
@@ -128,6 +141,10 @@ async def scrape_loop(client):
                 state.current_post = None
                 state.stage = "idle"
                 await asyncio.sleep(3)
+            if state.stage != "watching for new posts":
+                log.info("scan pass complete (caught up to latest message); watching for new posts")
+                state.stage = "watching for new posts"
+            await asyncio.sleep(30)  # poll for new posts
         except FloodWaitError as e:
             log.warning("scrape loop FloodWait %ds — sleeping in-process", e.seconds)
             await asyncio.sleep(e.seconds + 5)
@@ -142,7 +159,8 @@ async def main():
     client = await guarded(lambda: sm.start(), "userbot login")
     me = await client.get_me()
     log.info("logged in as %s (%s)", me.first_name, me.id)
-    commands.register(client)
+    # NOTE: userbot command handlers are DISABLED (bot-only replies).
+    # commands.register(client)  <- uncomment to re-enable Saved-Messages commands
     await start_health_server(PORT)
     tasks = [
         asyncio.ensure_future(scrape_loop(client)),

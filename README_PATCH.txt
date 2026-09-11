@@ -1,21 +1,24 @@
-TGSCRAPER v3 PATCH — 2 changed files only
-=========================================
-Replace these two files in your repo root (overwrite existing):
-  1. bot.py      — v3: FloodWait-safe startup (sleeps in-process instead of
-                   crashing -> Render never restart-loops or re-spams Telegram
-                   auth), clean task shutdown (no 'never awaited' warnings),
-                   FloodWait during scraping retries the SAME post, Py3.14
-                   event-loop creation.
-  2. botapi.py   — v3.1: control-bot client now created LAZILY inside start()
-                   (fixes Py3.14 'no current event loop in thread MainThread'
-                   crash at import), /ping added, 13-command tappable menu.
+TGSCRAPER v3.2 PATCH — 3 changed files only
+===========================================
+Overwrite these files in your repo root, push, and Render redeploys:
 
-All other files are unchanged from your current repo (commit eeaa01a).
+  1. bot.py     — FIX (MAIN): scraper now runs ONLY after /start (new
+                  state.started gate) — before, /start didn't actually arm
+                  the loop. FIX: userbot command replies DISABLED (bot-only
+                  replies, no more double answers). FIX: verbose Render logs
+                  (scraper ACTIVE / POST FOUND / post N done / scan pass
+                  complete / waiting config) so the log is never silent.
+                  Catch-up pass now polls every 30s instead of log-spamming.
+  2. botapi.py  — FIX: /start refuses with a clear message if target/bypass/
+                  db not set. /stop fully stops (started=False). Wizard no
+                  longer eats your next /command as an ID.
+  3. flow.py    — adds state.started flag.
 
-Render env vars needed:
-  API_ID, API_HASH, STRING_SESSION, BOT_TOKEN, ADMIN_USER_ID,
-  MONGO_URI=mongodb+srv://whyithappenes_db_user:<password>@jav.toeac7k.mongodb.net/?retryWrites=true&w=majority
+USAGE (control bot @scrapjavbot):
+  /ping -> /target -> send id -> /bypass -> send id -> /adddb -> send id
+  -> /start -> watch Render logs + /progress
 
-NOTE: your FloodWait is still active on Telegram's side (~33 min from the last
-restart). After deploying, the bot will log "FloodWaitError — sleeping Ns
-in-process" and simply wait it out. Do NOT manual-restart during that sleep.
+NOTE: Mongo progress from the old buggy run may be polluted (e.g. if the
+wizard ever swallowed "/start" as a text value). If scraping looks stuck at
+a weird message id, just tell me — one command (/reset) can clear it, or
+delete the 'progress' collection in Atlas.

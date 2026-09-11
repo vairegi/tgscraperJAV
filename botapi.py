@@ -74,7 +74,7 @@ def register(scrape_client):
     async def wizard_answer(ev):
         field = _pending.get(ev.sender_id)
         if not field or not _admin(ev.sender_id) or ev.raw_text.startswith("/"):
-            return
+            return  # a new /command cancels the pending wizard instead of being eaten
         v = _parse_id(ev.raw_text)
         try:
             await scrape_client.get_entity(v)
@@ -109,8 +109,15 @@ def register(scrape_client):
     @bot.on(events.NewMessage(pattern=r"^/start$"))
     async def start_cmd(ev):
         if _admin(ev.sender_id):
-            state.abort = False; state.paused = False
-            await ev.reply("▶️ Scraper started.")
+            state.abort = False; state.paused = False; state.started = True
+            cfg = await DB.get_config()
+            missing = [k for k in ("target_id", "bypass_id", "db_id") if not cfg.get(k)]
+            if missing:
+                await ev.reply("⚠️ Cannot start — missing: " + ", ".join(missing)
+                               + "\nSet them with /target /bypass /adddb first.")
+                state.started = False
+                return
+            await ev.reply("▶️ Scraper started. It will now scan the target channel from the first post.\nCheck /progress anytime.")
 
     @bot.on(events.NewMessage(pattern=r"^/pause$"))
     async def pause_cmd(ev):
@@ -121,7 +128,7 @@ def register(scrape_client):
     @bot.on(events.NewMessage(pattern=r"^/resume$"))
     async def resume_cmd(ev):
         if _admin(ev.sender_id):
-            state.paused = False; state.abort = False
+            state.paused = False; state.abort = False; state.started = True
             last = await DB.get_progress((await DB.get_config()).get("target_id") or 0)
             await ev.reply(f"▶️ Resumed from message id {last}.")
 
@@ -149,8 +156,8 @@ def register(scrape_client):
     @bot.on(events.NewMessage(pattern=r"^/stop$"))
     async def stop_cmd(ev):
         if _admin(ev.sender_id):
-            state.abort = True; state.running = False
-            await ev.reply("🛑 Stopped.")
+            state.abort = True; state.running = False; state.started = False
+            await ev.reply("🛑 Stopped. Progress saved — /resume or /start continues from the same post.")
 
 
 async def start(scrape_client):

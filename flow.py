@@ -18,6 +18,7 @@ class FlowState:
         self.abort = False
         self.running = False
         self.paused = False
+        self.started = False   # scraping runs ONLY after /start
 
 state = FlowState()
 
