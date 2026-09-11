@@ -42,13 +42,24 @@ async def _wait_new(client, entity, after_id, timeout, need_button=None, need_te
         await asyncio.sleep(POLL_INTERVAL)
     raise TimeoutError(f"no matching reply in chat {entity} within {timeout}s")
 
-async def _click(msg, needle):
-    """Click a button by partial text. Returns (click_result, button).
-    URL buttons return their URL string without opening anything."""
+async def _follow_button(msg, needle, client=None):
+    """Find a button by partial text and ACTIVATE it properly.
+    - URL buttons deep-linking to a bot (t.me/<bot>?start=<payload>): send
+      '/start <payload>' to that bot — a bare click fires plain /start, which
+      only gets the bot's generic welcome instead of the linked content.
+    - other URL buttons: return the URL.
+    - callback buttons: real msg.click(). Returns (result, button)."""
     found = find_button(msg, needle)
     if not found:
         raise RuntimeError(f"button '{needle}' not found")
     r, c, b = found
+    url = getattr(b, "url", None)
+    if url:
+        bot, payload = parse_tg_start(url)
+        if bot and client is not None:
+            await client.send_message(bot, f"/start {payload}" if payload else "/start")
+            return url, b
+        return url, b
     res = await msg.click(i=c, j=r)
     return res, b
 
@@ -74,19 +85,39 @@ async def _collect_media(client, entity, after_id, max_wait=90, quiet=5):
 async def process_post(client, cfg, msg):
     target, bypass, dbc = cfg["target_id"], cfg["bypass_id"], cfg["db_id"]
 
-    # 1) click Download on the target post
+    # 1) click Download on the target post — WITH its start payload, so Fubuki
+    #    serves the linked content instead of its generic welcome message
     state.stage = "clicking Download"
-    await _click(msg, BTN_DOWNLOAD)
+    base_f = await _last_id(client, FUBUKI_BOT)
+    await _follow_button(msg, BTN_DOWNLOAD, client)
 
-    # 2) Fubuki sends a new message with a 'Short link' button
+    # 2) Fubuki sends the linked message (Short link button) — or a link in
+    #    text; if it answered with the generic welcome, re-send /start once
     state.stage = "waiting Fubuki short-link message"
-    fm = await _wait_new(client, FUBUKI_BOT, await _last_id(client, FUBUKI_BOT),
-                         WAIT_BOT_REPLY, need_button=BTN_SHORT_LINK)
+    fm = None
+    for attempt in (1, 2):
+        try:
+            fm = await _wait_new(client, FUBUKI_BOT, base_f, WAIT_BOT_REPLY,
+                                 need_button=BTN_SHORT_LINK)
+        except TimeoutError:
+            try:
+                fm = await _wait_new(client, FUBUKI_BOT, base_f, 10, need_text="http")
+            except TimeoutError:
+                fm = None  # welcome-only round -> fall through to the retry nudge
+        if fm:
+            break
+        if attempt == 1:
+            await client.send_message(FUBUKI_BOT, "/start")  # nudge after welcome
+            base_f = await _last_id(client, FUBUKI_BOT)
+    if not fm:
+        raise RuntimeError("Fubuki sent neither a Short link button nor a link")
 
-    # 3) click 'Short link', capture the link
-    state.stage = "clicking Short link"
-    res, b = await _click(fm, BTN_SHORT_LINK)
-    short_link = getattr(b, "url", None) or (res if isinstance(res, str) and "http" in res else None)
+    # 3) activate 'Short link' (or take the link straight from the text)
+    state.stage = "getting short link"
+    short_link = first_url(fm.text or "")
+    if not short_link:
+        res, b = await _follow_button(fm, BTN_SHORT_LINK, client)
+        short_link = getattr(b, "url", None) or (res if isinstance(res, str) and "http" in res else None)
     if not short_link:
         lm = await _wait_new(client, FUBUKI_BOT, await _last_id(client, FUBUKI_BOT),
                              WAIT_BOT_REPLY, need_text="http")
@@ -101,7 +132,7 @@ async def process_post(client, cfg, msg):
 
     # 5) click 'Open link' -> deep link back into Fubuki
     state.stage = "clicking Open link"
-    res, b = await _click(bm, BTN_OPEN_LINK)
+    res, b = await _follow_button(bm, BTN_OPEN_LINK, client)
     open_url = getattr(b, "url", None) or (res if isinstance(res, str) else None)
     base_f = await _last_id(client, FUBUKI_BOT)
     if open_url:

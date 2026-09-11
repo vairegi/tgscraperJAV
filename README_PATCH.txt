@@ -1,18 +1,22 @@
-TGSCRAPER v5 PATCH — 2 changed files (overwrite, push, redeploy)
+TGSCRAPER v6 PATCH — 1 changed file (overwrite, push, redeploy)
 ================================================================
-  1. scraper.py — THE FONT FIX. Your channel's buttons are in Unicode
-     Mathematical Bold Sans-Serif: '𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱' / '𝗛𝗼𝘄 𝘁𝗼 𝗮𝗰𝗰𝗲𝘀𝘀 𝗹𝗶𝗻𝗸'
-     (confirmed in your Render log). Those glyphs are NOT the letters
-     D-o-w-n..., so plain matching could never find them. New norm() folds
-     ALL fancy fonts (bold/italic/serif/mono/fullwidth) to ASCII via NFKD,
-     then matches case-insensitively. Button matching everywhere now uses it.
-  2. flow.py    — the same normalization is applied to reply-text matching
-     (e.g. Fubuki's 'Here is your link' message), so styled text in later
-     workflow steps can't break the chain either.
+  flow.py — THE DOWNLOAD-CLICK FIX. Clicking '𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱' on a post used to
+  fire a BARE /start at @Fubuki_xRobot (no payload) -> Fubuki answered with
+  its generic welcome ('Hey there! ... Help / Close' — exactly your
+  screenshot) and the flow timed out ('no matching reply in chat
+  @Fubuki_xRobot within 20s', posts 11,12,13,14...).
+
+  New _follow_button():
+   - URL button deep-linking to a bot -> sends '/start <payload>' to that bot
+     (this is what makes Fubuki serve the linked content, not the welcome)
+   - plain URL button -> returns the URL (Short link capture)
+   - callback button -> real msg.click()
+  Reply accepted as 'Short link' BUTTON or plain-text link. If Fubuki shows
+  its welcome first, the flow nudges with one more /start and retries once;
+  total silence becomes a clean named failure (no crash, post is skipped and
+  logged in /progress). 'Open link' in the bypass group uses the same helper.
 
 AFTER DEPLOY:
   /reset -> /goto https://t.me/c/2514892126/11 -> /start
-  Render log should now show 'POST FOUND: msg 11' and the Download flow.
-
-Note: posts whose ONLY button is '𝗕𝗨𝗬 𝗦𝗨𝗕𝗦𝗖𝗥𝗜𝗣𝗧𝗜𝗢𝗡' (2 seen in your log)
-are correctly skipped — they have no Download button.
+  Expected log: POST FOUND -> clicking Download -> waiting Fubuki ->
+  getting short link -> waiting bypass group Open link -> ...
