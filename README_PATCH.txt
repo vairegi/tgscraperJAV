@@ -1,20 +1,14 @@
-TGSCRAPER v8 PATCH — 4 changed files (overwrite, push, redeploy)
+TGSCRAPER v9 PATCH — 1 changed file (overwrite, push, redeploy)
 ================================================================
-  forwarder.py — DB DELIVERY FIXED. v7 used send_message(..., spoiler=...) but
-     Telethon's send_message has NO 'spoiler' kwarg -> TypeError killed every
-     post at the cover step, so videos never reached the DB channel (your log:
-     posts 15-20 'unexpected keyword argument spoiler'). Now send_file
-     everywhere (it supports spoiler). Still copy-mode: no 'Forwarded from'
-     tag, buttons + spoiler preserved, albums grouped.
-  flow.py      — DOUBLE-LINK FIXED. 'Open link' in the bypass group deep-links
-     back to Fubuki; _follow_button sends /start <payload> once, but leftover
-     code sent the SAME payload again -> Fubuki replied twice (your screenshot:
-     two 'Here is your link' messages). Duplicate removed: exactly ONE /start
-     per hop. STEP_DELAY (2s) added between workflow steps.
-  config.py    — new env knobs: STEP_DELAY (2s), POST_DELAY (10s).
-  bot.py       — 10s pause between posts: one post fully processed at a time,
-     ban-safe pacing.
+  flow.py — DUPLICATE VIDEOS FIXED. In Telethon, a video message has BOTH
+  .video AND .document set. The split was:
+      vids = [m for m in media if m.video]
+      srts = [m for m in media if m.document]     <- videos matched this too
+  so vids + srts contained every video TWICE -> vid1, vid1, vid2, vid2 in
+  your DB channel (exactly your screenshot). Now:
+      srts = [m for m in media if m.document and not m.video]
+  Each video is sent exactly once; the .srt still ships once.
 
-AFTER DEPLOY: continues from saved progress. Posts 15-20 failed AFTER Rias
-delivered (cover step) so they won't auto-retry — to redo them:
-/goto 15 then /start.
+AFTER DEPLOY: continues from saved progress; nothing else to redo.
+Already-duplicated posts in the DB channel: delete those copies manually,
+or /goto that message id + /start to redo a specific post cleanly.

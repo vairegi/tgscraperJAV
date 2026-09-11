@@ -157,8 +157,10 @@ async def process_post(client, cfg, msg):
     base = await _last_id(client, bot)
     await client.send_message(bot, f"/start {payload}" if payload else "/start")
     media = await _collect_media(client, bot, base)
+    # a video message has BOTH .video and .document — exclude videos from
+    # the document list or every video gets sent twice (vid1,vid1,vid2,vid2)
     vids = [m for m in media if m.video]
-    srts = [m for m in media if m.document]
+    srts = [m for m in media if m.document and not m.video]
     if not vids and not srts:
         raise RuntimeError("bot sent no videos/srt")
 
