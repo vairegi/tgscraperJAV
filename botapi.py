@@ -1,9 +1,8 @@
 """botapi.py — control BOT (BOT_TOKEN from BotFather) with a real tappable
-command menu. Menu commands are no-argument; IDs are added via the setup
-wizard: tap /target -> the bot asks for the id -> you send it -> saved.
+command menu. /target /bypass /adddb run as a wizard: tap the command, the bot
+asks for the id, you send it, it validates + saves. v3: /ping added.
 Only ADMIN_USER_ID (your numeric Telegram id) can use it."""
-import asyncio
-from telethon import TelegramClient, events, Button
+from telethon import TelegramClient, events
 from telethon.sessions import MemorySession
 from telethon.tl.functions.bots import SetBotCommandsRequest
 from telethon.tl.types import BotCommand, BotCommandScopeDefault
@@ -11,13 +10,10 @@ from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_USER_ID
 import db as DB
 from flow import state
 
-# Event loop creation for Python 3.14+
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-
-bot = TelegramClient(MemorySession(), API_ID, API_HASH, loop=loop)
+bot = TelegramClient(MemorySession(), API_ID, API_HASH)
 
 _CMDS = [
+    ("ping",     "Check the bot is alive"),
     ("target",   "Set target channel (wizard)"),
     ("bypass",   "Set bypass group (wizard)"),
     ("adddb",    "Set database channel (wizard)"),
@@ -32,17 +28,18 @@ _CMDS = [
     ("stop",     "Stop the scraper"),
 ]
 
-_pending = {}  # user_id -> field awaiting id
+_pending = {}
+
 
 def _admin(uid):
     return ADMIN_USER_ID == 0 or uid == ADMIN_USER_ID
 
+
 async def _menu():
     await bot(SetBotCommandsRequest(
-        scope=BotCommandScopeDefault(),
-        lang_code="",
-        commands=[BotCommand(c, d) for c, d in _CMDS],
-    ))
+        scope=BotCommandScopeDefault(), lang_code="",
+        commands=[BotCommand(c, d) for c, d in _CMDS]))
+
 
 def _parse_id(raw):
     raw = raw.strip()
@@ -51,21 +48,21 @@ def _parse_id(raw):
     except ValueError:
         return raw.lstrip("@")
 
-async def _fmt_progress():
-    from bot import fmt_progress  # shared formatter
-    return await fmt_progress()
 
 def register(scrape_client):
+    @bot.on(events.NewMessage(pattern=r"^/ping$"))
+    async def ping_cmd(ev):
+        if _admin(ev.sender_id):
+            await ev.reply(f"\U0001F3D3 Pong — control bot + scraper alive.\n"
+                           f"📍 Stage: {state.stage} | Running: {state.running} | Paused: {state.paused}")
+
     @bot.on(events.NewMessage(pattern=r"^/(target|bypass|adddb)$"))
     async def wizard(ev):
         if not _admin(ev.sender_id):
             return
-        field = {"target": "target_id", "bypass": "bypass_id", "adddb": "db_id"}[
-            ev.raw_text[1:]]
+        field = {"target": "target_id", "bypass": "bypass_id", "adddb": "db_id"}[ev.raw_text[1:]]
         _pending[ev.sender_id] = field
-        await ev.reply(
-            f"Send me the **{field}** now (numeric id like -100… or @username).\n"
-            "Cancel: /cancel")
+        await ev.reply(f"Send me the **{field}** now (numeric id like -100… or @username).\nCancel: /cancel")
 
     @bot.on(events.NewMessage(pattern=r"^/cancel$"))
     async def cancel(ev):
@@ -79,7 +76,7 @@ def register(scrape_client):
             return
         v = _parse_id(ev.raw_text)
         try:
-            await scrape_client.get_entity(v)  # validate the account can see it
+            await scrape_client.get_entity(v)
         except Exception as e:
             await ev.reply(f"⚠️ Can't access that chat with the userbot account: {e}")
             return
@@ -100,12 +97,11 @@ def register(scrape_client):
         async for m in scrape_client.iter_messages(cfg["target_id"], limit=30):
             if is_post(m):
                 btn = find_button(m, BTN_DOWNLOAD)
-                await ev.reply(
-                    f"📄 Last post in target channel\n"
-                    f"• msg id: {m.id}\n"
-                    f"• date: {m.date:%Y-%m-%d %H:%M UTC}\n"
-                    f"• caption: {(m.message or '')[:200]}\n"
-                    f"• Download button: {'yes — ' + btn[2].text if btn else 'NO'}")
+                cap = (m.message or "")[:200].replace("\n", " ")
+                await ev.reply("📄 Last post in target channel\n• msg id: " + str(m.id)
+                               + "\n• date: " + m.date.strftime("%Y-%m-%d %H:%M UTC")
+                               + "\n• caption: " + cap
+                               + "\n• Download button: " + ("yes — " + btn[2].text if btn else "NO"))
                 return
         await ev.reply("No qualifying post found in the last 30 messages.")
 
@@ -132,16 +128,16 @@ def register(scrape_client):
     async def status_cmd(ev):
         if _admin(ev.sender_id):
             cfg = await DB.get_config()
-            await ev.reply(
-                f"🤖 Running: {state.running} | Paused: {state.paused}\n"
-                f"📍 Stage: {state.stage}\n📄 Current post: {state.current_post}\n"
-                f"🎯 Target: {cfg.get('target_id')}\n🔁 Bypass: {cfg.get('bypass_id')}\n"
-                f"🗄 DB: {cfg.get('db_id')}")
+            await ev.reply(f"🤖 Running: {state.running} | Paused: {state.paused}\n"
+                           f"📍 Stage: {state.stage}\n📄 Current post: {state.current_post}\n"
+                           f"🎯 Target: {cfg.get('target_id')}\n🔁 Bypass: {cfg.get('bypass_id')}\n"
+                           f"🗄 DB: {cfg.get('db_id')}")
 
     @bot.on(events.NewMessage(pattern=r"^/progress$"))
     async def progress_cmd(ev):
         if _admin(ev.sender_id):
-            await ev.reply(await _fmt_progress())
+            from bot import fmt_progress
+            await ev.reply(await fmt_progress())
 
     @bot.on(events.NewMessage(pattern=r"^/skip$"))
     async def skip_cmd(ev):
@@ -154,6 +150,7 @@ def register(scrape_client):
         if _admin(ev.sender_id):
             state.abort = True; state.running = False
             await ev.reply("🛑 Stopped.")
+
 
 async def start(scrape_client):
     await bot.start(bot_token=BOT_TOKEN)

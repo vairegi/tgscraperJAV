@@ -34,7 +34,13 @@ saves it. Add all three one by one, then tap `/start`.
 | `/resume` | resume exactly from the last saved message id |
 | `/status` `/current` | live stage & current post |
 | `/progress` | posts done, **last scraped post**, resume point, media sent, failures + reasons |
+| `/ping` | check the bot is alive (works in control bot AND userbot) |
 | `/skip` `/stop` | skip current post / stop |
+
+## Flood-wait protection (v3)
+If Telegram returns FloodWaitError at login or mid-scrape, the process now
+SLEEPS in place for the required seconds instead of crashing — so Render never
+enters a crash-restart loop and Telegram's flood timer is never refreshed.
 
 ## Crash resilience
 Progress (last processed message id) is written to MongoDB after EVERY post.
