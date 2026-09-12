@@ -47,6 +47,15 @@ Progress (last processed message id) is written to MongoDB after EVERY post.
 If Render crashes or restarts, the bot resumes from that exact point —
 nothing is scraped twice.
 
+## Copy-mode delivery (v17)
+The cover post and all media arrive in the DB channel as FRESH posts with NO
+"Forwarded from" tag — the userbot re-sends each message's media by its
+Telegram file reference (send_file with msg.media), so Telegram copies the
+file server-to-server. Nothing is downloaded to disk or RAM (no temp files,
+stays flat on the 512MB free tier even for 700MB+ videos), and every file
+keeps its original format: playable video with thumbnail/duration/filename,
+spoiler flag, caption and buttons all preserved.
+
 IDs: use the numeric id (e.g. `-1001234567890`) or @username.
 The account must be a member of the target channel, bypass group (with
 post permission), and admin (post rights) in the DB channel.
