@@ -413,6 +413,7 @@ def register(scrape_client):
             return
         tid = targets[idx]["id"]
         await DB.reset_progress(tid)
+        state.reset_gen += 1
         state._last_scan = None
         await ev.reply(f"♻️ Progress reset for target {idx+1} ({tid}).\n"
                        "Next scan starts from POST 1. /start (or /resume) to begin.")
@@ -468,6 +469,7 @@ def register(scrape_client):
             await ev.reply("Usage: /goto <msg_id> | /goto <target#> <msg_id> | /goto <message link>")
             return
         await DB.set_progress(tid, mid - 1)  # loop uses min_id=last_id -> starts AT mid
+        state.reset_gen += 1
         state._last_scan = None
         await ev.reply(f"📌 Target {tid} will resume from message {mid}. /start or /resume to go.")
 

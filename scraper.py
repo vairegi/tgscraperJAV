@@ -79,3 +79,25 @@ def parse_private_link(text):
     """t.me/c/<channel>/<msg> -> (chat_id=-100<channel>, msg_id)."""
     m = C_LINK_RE.search(text or "")
     return (int("-100" + m.group(1)), int(m.group(2))) if m else (None, None)
+
+VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".ts",
+             ".flv", ".wmv", ".mpg", ".mpeg", ".3gp")
+
+
+def is_video_msg(m):
+    """True for ANY video file — incl. .mkv/.avi sent as plain documents,
+    which Telethon does NOT expose via m.video."""
+    if getattr(m, "video", None):
+        return True
+    if not getattr(m, "document", None):
+        return False
+    mime = (getattr(m.document, "mime_type", "") or "").lower()
+    if mime.startswith("video/"):
+        return True
+    name = (getattr(getattr(m, "file", None), "name", "") or "").lower()
+    return name.endswith(VIDEO_EXT)
+
+
+def is_srt_msg(m):
+    name = (getattr(getattr(m, "file", None), "name", "") or "").lower()
+    return name.endswith(".srt")

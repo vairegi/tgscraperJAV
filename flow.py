@@ -4,7 +4,7 @@ Download -> Fubuki Short link -> bypass group Open link -> Fubuki final link
 import asyncio, time
 from config import (BTN_DOWNLOAD, BTN_SHORT_LINK, BTN_OPEN_LINK, FUBUKI_BOT, MEDIA_BOT,
                     WAIT_BOT_REPLY, WAIT_BYPASS_REPLY, POLL_INTERVAL, STEP_DELAY)
-from scraper import find_button, parse_tg_start, first_url, norm
+from scraper import find_button, parse_tg_start, first_url, norm, is_video_msg, is_srt_msg
 import db as DB
 import forwarder
 
@@ -19,6 +19,7 @@ class FlowState:
         self.running = False
         self.paused = False
         self.started = False   # scraping runs ONLY after /start
+        self.reset_gen = 0     # bumped by /reset and /goto -> aborts the current pass
 
 state = FlowState()
 
@@ -74,7 +75,7 @@ async def _collect_media(client, entity, after_id, max_wait=90, quiet=5):
         msgs = await client.get_messages(entity, limit=20, min_id=after_id)
         for m in sorted([m for m in msgs if m and m.id > top], key=lambda x: x.id):
             top = max(top, m.id)
-            if m.video or (m.document and (m.file.name or "").lower().endswith(".srt")):
+            if is_video_msg(m) or is_srt_msg(m):
                 media.append(m)
                 last_seen = time.time()
         if media and time.time() - last_seen > quiet:
@@ -159,8 +160,8 @@ async def process_post(client, cfg, msg):
     media = await _collect_media(client, bot, base)
     # a video message has BOTH .video and .document — exclude videos from
     # the document list or every video gets sent twice (vid1,vid1,vid2,vid2)
-    vids = [m for m in media if m.video]
-    srts = [m for m in media if m.document and not m.video]
+    vids = [m for m in media if is_video_msg(m)]
+    srts = [m for m in media if is_srt_msg(m)]
     if not vids and not srts:
         raise RuntimeError("bot sent no videos/srt")
 

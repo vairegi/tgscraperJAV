@@ -131,6 +131,7 @@ async def scrape_loop(sm):
         cfg = dict(cfg)
         cfg["target_id"] = target
         cfg["db_id"] = tsel.get("db_id") or cfg.get("db_id")  # per-target DB wins
+        pass_gen = state.reset_gen
         if len(targets) > 1:
             log.info("multi-target: %d channels, working on %s -> DB %s", len(targets), target, cfg["db_id"])
         if getattr(state, "_last_scan", None) != (target, last_id):
@@ -142,6 +143,11 @@ async def scrape_loop(sm):
                     await asyncio.sleep(2)
                 if state.abort:
                     state.abort = False
+                    break
+                if state.reset_gen != pass_gen:
+                    # /reset or /goto ran mid-pass — drop this pass NOW so the
+                    # next pass starts from the fresh progress (no clobbering)
+                    log.info("progress changed mid-pass (reset/goto) — restarting pass")
                     break
                 if not is_post(msg):
                     log.info("skip msg %s (%s)", msg.id, why_not_post(msg))
