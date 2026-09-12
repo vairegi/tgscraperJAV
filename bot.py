@@ -98,7 +98,10 @@ async def scrape_loop(sm):
             state.running = False
             continue
         cfg = await DB.get_config()
-        missing = [k for k in ("target_id", "bypass_id", "db_id") if not cfg.get(k)]
+        targets = await DB.get_targets()
+        missing = [k for k in ("bypass_id", "db_id") if not cfg.get(k)]
+        if not targets:
+            missing.append("target (use /target)")
         if missing:
             state.running = False
             if state.stage != "waiting config":
@@ -106,10 +109,13 @@ async def scrape_loop(sm):
                 state.stage = "waiting config"
             continue
         if not state.running:
-            log.info("scraper ACTIVE — target=%s bypass=%s db=%s", cfg["target_id"], cfg["bypass_id"], cfg["db_id"])
+            log.info("scraper ACTIVE — targets=%s bypass=%s db=%s", targets, cfg["bypass_id"], cfg["db_id"])
         state.running = True
-        target = cfg["target_id"]
-        last_id = await DB.get_progress(target)
+        # rotate through targets: pick the one with the oldest progress
+        tprog = [(t, await DB.get_progress(t)) for t in targets]
+        target, last_id = min(tprog, key=lambda x: x[1])
+        if len(targets) > 1:
+            log.info("multi-target: %d channels, working on %s now", len(targets), target)
         if getattr(state, "_last_scan", None) != (target, last_id):
             log.info("scanning target %s from message id %s (oldest -> newest)", target, last_id)
             state._last_scan = (target, last_id)

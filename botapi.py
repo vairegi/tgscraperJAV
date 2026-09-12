@@ -15,7 +15,9 @@ bot = None  # created lazily inside start() — creating a client at import time
 
 _CMDS = [
     ("ping",     "Check the bot is alive"),
-    ("target",   "Set target channel (wizard)"),
+    ("target",   "Add a target channel (wizard)"),
+    ("targets",  "List target channels"),
+    ("deltarget","Remove a target channel (wizard)"),
     ("bypass",   "Set bypass group (wizard)"),
     ("adddb",    "Set database channel (wizard)"),
     ("lastpost", "Show newest post in target channel"),
@@ -59,13 +61,24 @@ def register(scrape_client):
             await ev.reply(f"\U0001F3D3 Pong — control bot + scraper alive.\n"
                            f"📍 Stage: {state.stage} | Running: {state.running} | Paused: {state.paused}")
 
-    @bot.on(events.NewMessage(pattern=r"^/(target|bypass|adddb)$"))
+    @bot.on(events.NewMessage(pattern=r"^/(target|bypass|adddb|deltarget)$"))
     async def wizard(ev):
         if not _admin(ev.sender_id):
             return
-        field = {"target": "target_id", "bypass": "bypass_id", "adddb": "db_id"}[ev.raw_text[1:]]
+        cmd = ev.raw_text[1:]
+        if cmd == "deltarget":
+            targets = await DB.get_targets()
+            if not targets:
+                await ev.reply("No target channels set. Add one with /target")
+                return
+            _pending[ev.sender_id] = "deltarget"
+            listing = "\n".join(f"  {i+1}. {t}" for i, t in enumerate(targets))
+            await ev.reply(f"Current targets:\n{listing}\n\nSend the id (or number) to REMOVE.\nCancel: /cancel")
+            return
+        field = {"target": "target_id", "bypass": "bypass_id", "adddb": "db_id"}[cmd]
         _pending[ev.sender_id] = field
-        await ev.reply(f"Send me the **{field}** now (numeric id like -100… or @username).\nCancel: /cancel")
+        hint = "the channel to scrape (adds to your list)" if cmd == "target" else field
+        await ev.reply(f"Send me the **{hint}** now (numeric id like -100… or @username).\nCancel: /cancel")
 
     @bot.on(events.NewMessage(pattern=r"^/cancel$"))
     async def cancel(ev):
@@ -77,33 +90,68 @@ def register(scrape_client):
         field = _pending.get(ev.sender_id)
         if not field or not _admin(ev.sender_id) or ev.raw_text.startswith("/"):
             return  # a new /command cancels the pending wizard instead of being eaten
+        if field == "deltarget":
+            targets = await DB.get_targets()
+            raw = ev.raw_text.strip()
+            if raw.isdigit() and 1 <= int(raw) <= len(targets):
+                v = targets[int(raw) - 1]          # pick by list number
+            else:
+                v = _parse_id(raw)
+            if v not in targets:
+                await ev.reply(f"⚠️ {v} is not in your targets list.")
+                return
+            remaining = await DB.remove_target(v)
+            _pending.pop(ev.sender_id, None)
+            await ev.reply(f"🗑 Removed {v}.\nTargets left: {remaining or 'none'}")
+            return
         v = _parse_id(ev.raw_text)
         try:
             await scrape_client.get_entity(v)
         except Exception as e:
             await ev.reply(f"⚠️ Can't access that chat with the userbot account: {e}")
             return
+        if field == "target_id":
+            targets = await DB.add_target(v)
+            _pending.pop(ev.sender_id, None)
+            await ev.reply(f"✅ Target added: {v}\nAll targets: {targets}\nUse /targets to list, /deltarget to remove, /start to scrape.")
+            return
         await DB.set_config(field, v)
         _pending.pop(ev.sender_id, None)
         await ev.reply(f"✅ Saved {field} = {v}\nNext: /target /bypass /adddb or /start")
+
+    @bot.on(events.NewMessage(pattern=r"^/targets$"))
+    async def targets_cmd(ev):
+        if not _admin(ev.sender_id):
+            return
+        targets = await DB.get_targets()
+        if not targets:
+            await ev.reply("No target channels. Add one with /target")
+            return
+        lines = ["🎯 Target channels:"]
+        for i, t in enumerate(targets):
+            prog = await DB.get_progress(t)
+            lines.append(f"  {i+1}. {t} — resume at msg {prog}")
+        lines.append("\n/deltarget to remove one.")
+        await ev.reply("\n".join(lines))
 
     @bot.on(events.NewMessage(pattern=r"^/lastpost$"))
     async def lastpost(ev):
         if not _admin(ev.sender_id):
             return
-        cfg = await DB.get_config()
-        if not cfg.get("target_id"):
-            await ev.reply("Set the target first: /target")
+        targets = await DB.get_targets()
+        if not targets:
+            await ev.reply("Set a target first: /target")
             return
+        cfg = await DB.get_config()
         from scraper import is_post, find_button
         from config import BTN_DOWNLOAD
         total = 0
         newest = None
-        async for m0 in scrape_client.iter_messages(cfg["target_id"], limit=500):
+        async for m0 in scrape_client.iter_messages(targets[0], limit=500):
             total += 1
             if newest is None and is_post(m0):
                 newest = m0
-        resume_at = await DB.get_progress(cfg["target_id"])
+        resume_at = await DB.get_progress(targets[0])
         if newest:
             m = newest
             btn = find_button(m, BTN_DOWNLOAD)
@@ -162,7 +210,7 @@ def register(scrape_client):
             cfg = await DB.get_config()
             await ev.reply(f"🤖 Running: {state.running} | Paused: {state.paused}\n"
                            f"📍 Stage: {state.stage}\n📄 Current post: {state.current_post}\n"
-                           f"🎯 Target: {cfg.get('target_id')}\n🔁 Bypass: {cfg.get('bypass_id')}\n"
+                           f"🎯 Targets: {await DB.get_targets()}\n🔁 Bypass: {cfg.get('bypass_id')}\n"
                            f"🗄 DB: {cfg.get('db_id')}")
 
     @bot.on(events.NewMessage(pattern=r"^/progress$"))

@@ -2,7 +2,7 @@
 Download -> Fubuki Short link -> bypass group Open link -> Fubuki final link
 -> Rias bot videos+srt -> cover post + media to DB channel."""
 import asyncio, time
-from config import (BTN_DOWNLOAD, BTN_SHORT_LINK, BTN_OPEN_LINK, FUBUKI_BOT,
+from config import (BTN_DOWNLOAD, BTN_SHORT_LINK, BTN_OPEN_LINK, FUBUKI_BOT, MEDIA_BOT,
                     WAIT_BOT_REPLY, WAIT_BYPASS_REPLY, POLL_INTERVAL, STEP_DELAY)
 from scraper import find_button, parse_tg_start, first_url, norm
 import db as DB

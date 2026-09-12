@@ -58,3 +58,4 @@ BTN_OPEN_LINK = "open link"
 
 # Known bots in the chain
 FUBUKI_BOT = os.environ.get("FUBUKI_BOT", "@Fubuki_xRobot")
+MEDIA_BOT = os.environ.get("MEDIA_BOT", "@Rias_Gremory_Robot")  # bot that serves videos+srt

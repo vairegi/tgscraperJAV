@@ -58,3 +58,29 @@ async def get_last_post(target_id):
 async def reset_progress(target_id):
     """Clear progress + last_post for a target (next scan starts from msg 1)."""
     await db().progress.delete_one({"_id": str(target_id)})
+
+async def add_target(tid):
+    """Add a target channel id to the list (no duplicates)."""
+    cfg = await db().config.find_one({"_id": "config"}) or {}
+    targets = cfg.get("targets", [])
+    if tid not in targets:
+        targets.append(tid)
+    await db().config.update_one({"_id": "config"},
+        {"$set": {"targets": targets, "target_id": targets[0]}}, upsert=True)
+    return targets
+
+async def remove_target(tid):
+    cfg = await db().config.find_one({"_id": "config"}) or {}
+    targets = [t for t in cfg.get("targets", []) if t != tid]
+    upd = {"targets": targets}
+    if cfg.get("target_id") == tid:
+        upd["target_id"] = targets[0] if targets else None
+    await db().config.update_one({"_id": "config"}, {"$set": upd}, upsert=True)
+    return targets
+
+async def get_targets():
+    cfg = await db().config.find_one({"_id": "config"}) or {}
+    ts = cfg.get("targets") or []
+    if not ts and cfg.get("target_id"):
+        ts = [cfg["target_id"]]  # legacy single-target compat
+    return ts
