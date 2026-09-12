@@ -8,8 +8,10 @@ from telethon.sessions import MemorySession
 from telethon.tl.functions.bots import SetBotCommandsRequest
 from telethon.tl.types import BotCommand, BotCommandScopeDefault
 from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_USER_ID
+import re
 import db as DB
 from flow import state
+from telethon.tl.types import Channel, Chat, User
 
 bot = None  # created lazily inside start() (Py3.14 has no loop at import time)
 
@@ -56,6 +58,31 @@ def _parse_id(raw):
         return raw.lstrip("@")
 
 
+C_LINK = re.compile(r"(?:https?://)?t\.me/c/(\d+)(?:/\d+)?")
+
+
+def _parse_chat_id(raw):
+    """Numeric id, @username, or a t.me/c/<channel>[/<msg>] link -> chat id."""
+    raw = raw.strip()
+    m = C_LINK.search(raw)
+    if m:
+        return int("-100" + m.group(1))
+    return _parse_id(raw)
+
+
+def _not_a_channel_msg(v, kind="channel"):
+    return (f"⚠️ {v} resolves to a USER/BOT, not a {kind} — nothing can be posted there.\n"
+            "Easiest fix: copy ANY message link from the target chat "
+            "(looks like https://t.me/c/1234567890/12) and paste that link instead of the id.")
+
+
+def _entity_ok(ent, need):
+    """need='channel' -> Channel only; need='group' -> Channel or Chat."""
+    if need == "channel":
+        return isinstance(ent, Channel)
+    return isinstance(ent, (Channel, Chat))
+
+
 async def _list_targets_text():
     targets = await DB.get_targets()
     if not targets:
@@ -70,14 +97,20 @@ async def _list_targets_text():
 
 async def _add_target_with_db(scrape_client, ev, tid, dbid):
     try:
-        await scrape_client.get_entity(tid)
+        ent_t = await scrape_client.get_entity(tid)
     except Exception as e:
         await ev.reply(f"⚠️ Can't access that target with the userbot account: {e}")
         return
+    if not _entity_ok(ent_t, "channel"):
+        await ev.reply(_not_a_channel_msg(tid, "channel"))
+        return
     try:
-        await scrape_client.get_entity(dbid)
+        ent_d = await scrape_client.get_entity(dbid)
     except Exception as e:
         await ev.reply(f"⚠️ Can't access that DB channel with the userbot account: {e}")
+        return
+    if not _entity_ok(ent_d, "channel"):
+        await ev.reply(_not_a_channel_msg(dbid, "channel"))
         return
     await DB.add_target(tid, dbid)
     await ev.reply(f"✅ Target saved:\n  {tid} → DB {dbid}\n\n/targets to view all, /start to scrape.")
@@ -110,8 +143,8 @@ def register(scrape_client):
             return
         arg = (ev.pattern_match.group(1) or "").strip()
         if arg:
-            _pending[ev.sender_id] = ("target_db", _parse_id(arg))
-            await ev.reply(f"Target: **{_parse_id(arg)}**\nNow send the DB channel id for THIS target "
+            _pending[ev.sender_id] = ("target_db", _parse_chat_id(arg))
+            await ev.reply(f"Target: **{_parse_chat_id(arg)}**\nNow send the DB channel id for THIS target "
                            f"(where its videos+srt go).\nCancel: /cancel")
             return
         _pending[ev.sender_id] = ("target_id", None)
@@ -125,7 +158,7 @@ def register(scrape_client):
         arg = (ev.pattern_match.group(2) or "").strip()
         field = {"bypass": "bypass_id", "adddb": "db_id"}[cmd]
         if arg:
-            await _save_simple(ev, field, _parse_id(arg))
+            await _save_simple(ev, field, _parse_chat_id(arg))
             return
         _pending[ev.sender_id] = (field, None)
         label = "bypass group" if field == "bypass_id" else "fallback DB channel"
@@ -133,9 +166,15 @@ def register(scrape_client):
 
     async def _save_simple(ev, field, v):
         try:
-            await scrape_client.get_entity(v)
+            ent = await scrape_client.get_entity(v)
         except Exception as e:
             await ev.reply(f"⚠️ Can't access that chat with the userbot account: {e}")
+            return
+        if field == "db_id" and not _entity_ok(ent, "channel"):
+            await ev.reply(_not_a_channel_msg(v, "channel"))
+            return
+        if field == "bypass_id" and not _entity_ok(ent, "group"):
+            await ev.reply(_not_a_channel_msg(v, "group"))
             return
         await DB.set_config(field, v)
         await ev.reply(f"✅ Saved {field} = {v}")
@@ -193,11 +232,14 @@ def register(scrape_client):
             await ev.reply("⚠️ Format: <target number> <db_id> — e.g.  2 -100999888777")
             return
         t = targets[int(parts[0]) - 1]
-        dbid = _parse_id(parts[1])
+        dbid = _parse_chat_id(parts[1])
         try:
-            await scrape_client.get_entity(dbid)
+            ent = await scrape_client.get_entity(dbid)
         except Exception as e:
             await ev.reply(f"⚠️ Can't access that DB channel with the userbot account: {e}")
+            return
+        if not _entity_ok(ent, "channel"):
+            await ev.reply(_not_a_channel_msg(dbid, "channel"))
             return
         await DB.set_target_db(t["id"], dbid)
         await ev.reply(f"✅ Target {t['id']} now posts to DB {dbid}")
@@ -214,18 +256,21 @@ def register(scrape_client):
             return  # a new /command cancels the pending wizard instead of being eaten
         kind, extra = item
         if kind == "target_id":
-            tid = _parse_id(ev.raw_text)
+            tid = _parse_chat_id(ev.raw_text)
             try:
-                await scrape_client.get_entity(tid)
+                ent = await scrape_client.get_entity(tid)
             except Exception as e:
                 await ev.reply(f"⚠️ Can't access that channel with the userbot account: {e}")
+                return
+            if not _entity_ok(ent, "channel"):
+                await ev.reply(_not_a_channel_msg(tid, "channel"))
                 return
             _pending[ev.sender_id] = ("target_db", tid)
             await ev.reply(f"Target: **{tid}**\nNow send the DB channel id for THIS target "
                            f"(where its videos+srt go).\nCancel: /cancel")
             return
         if kind == "target_db":
-            dbid = _parse_id(ev.raw_text)
+            dbid = _parse_chat_id(ev.raw_text)
             _pending.pop(ev.sender_id, None)
             await _add_target_with_db(scrape_client, ev, extra, dbid)
             return
@@ -239,7 +284,7 @@ def register(scrape_client):
             return
         # simple fields: bypass_id / db_id
         _pending.pop(ev.sender_id, None)
-        await _save_simple(ev, kind, _parse_id(ev.raw_text))
+        await _save_simple(ev, kind, _parse_chat_id(ev.raw_text))
 
     # ---------- view ----------
     @bot.on(events.NewMessage(pattern=r"^/targets$"))
