@@ -1,24 +1,18 @@
-TGSCRAPER v14 PATCH — 4 changed files (overwrite, push, redeploy)
+TGSCRAPER v15 PATCH — 2 changed files (overwrite, push, redeploy)
 =================================================================
-  1. /reset <n> FIXED for real. Root cause: resetting deleted the progress
-     doc, but the IN-FLIGHT scan pass kept walking with the old resume
-     point and re-saved progress at every message — clobbering your reset
-     (that's why target 2 kept resuming where it left off). Now /reset and
-     /goto bump a 'reset generation' flag; the running pass aborts
-     immediately and the next pass starts from the FRESH progress.
-     Verified: mid-run reset -> processed msg 51 -> reset fires ->
-     next pass starts at msg 1. Files: bot.py, botapi.py, flow.py.
+  forwarder.py — ACC2 MediaEmptyError FIXED. File references (msg.media)
+  are bound to the account that received them; acc2 re-sending acc1-
+  fetched media got MediaEmptyError on every post (your log: 99-114, all
+  at send_cover). Now media is downloaded to BYTES first, then re-uploaded
+  — no account binding, any rotating account can send. Tag-free copy mode,
+  spoiler + buttons + albums preserved, direct-resend fallback kept.
 
-  2. ANY video format forwarded. Root cause: an .mkv sent as a plain
-     document has NO m.video attribute in Telethon, so it was silently
-     skipped. New detection: m.video OR document with video/* mime OR
-     filename ending .mp4/.mkv/.avi/.mov/.webm/.m4v/.ts/.flv/.wmv/.mpg/
-     .mpeg/.3gp. The vids/srts split uses the same detection, so no
-     duplicates either. Files: scraper.py, flow.py.
+  flow.py — MEDIA BOT NOW COLLECTS EVERYTHING: videos (any format incl
+  .mkv), .srt, images, stickers, other documents — all go to the DB
+  channel. Stats gain 'other_sent'. (Also fixes an 'other' NameError that
+  slipped into the split block.)
 
-  3. Mongo URI verified live from sandbox: ping + full CRUD on every
-     collection = 9/9 PASS. Your new URI is good. Test data cleaned up.
+NOTE: bytes re-upload = a bit slower per post, but works on every account.
 
-AFTER DEPLOY: /reset 2 then /start — the Render log should show
-'scanning target ... from message id 0' for target 2 and .mkv files will
-now land in its DB channel like everything else.
+AFTER DEPLOY — re-run the failed acc2 posts:
+  /goto https://t.me/c/<channel>/99   then   /start

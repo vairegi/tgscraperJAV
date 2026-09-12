@@ -75,7 +75,9 @@ async def _collect_media(client, entity, after_id, max_wait=90, quiet=5):
         msgs = await client.get_messages(entity, limit=20, min_id=after_id)
         for m in sorted([m for m in msgs if m and m.id > top], key=lambda x: x.id):
             top = max(top, m.id)
-            if is_video_msg(m) or is_srt_msg(m):
+            # collect EVERYTHING the media bot delivers — videos (any format),
+            # srt files, images, stickers, other documents
+            if m.media or m.photo or m.document or m.video or m.sticker:
                 media.append(m)
                 last_seen = time.time()
         if media and time.time() - last_seen > quiet:
@@ -162,17 +164,20 @@ async def process_post(client, cfg, msg):
     # the document list or every video gets sent twice (vid1,vid1,vid2,vid2)
     vids = [m for m in media if is_video_msg(m)]
     srts = [m for m in media if is_srt_msg(m)]
-    if not vids and not srts:
-        raise RuntimeError("bot sent no videos/srt")
+    other = [m for m in media if not is_video_msg(m) and not is_srt_msg(m)]
+    if not media:
+        raise RuntimeError("bot sent no media")
 
     await asyncio.sleep(STEP_DELAY)
 
     # 8) DB channel: cover post FIRST, then videos + srt
     state.stage = "sending cover post to DB"
     await forwarder.send_cover(client, target, msg, dbc)
-    state.stage = f"sending {len(vids)} video(s)+{len(srts)} srt to DB"
-    await forwarder.send_media(client, bot, vids + srts, dbc)
+    state.stage = f"sending {len(vids)} video(s)+{len(srts)} srt+{len(other)} other to DB"
+    await forwarder.send_media(client, bot, vids + srts + other, dbc)
 
     await DB.incr("posts_done"); await DB.incr("videos_sent", len(vids)); await DB.incr("srt_sent", len(srts))
+    if other:
+        await DB.incr("other_sent", len(other))
     await DB.set_last_post(target, msg.id)
     state.stage = "idle"
