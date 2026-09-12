@@ -1,30 +1,33 @@
-TGSCRAPER v12 PATCH — 6 changed files (overwrite, push, redeploy)
+TGSCRAPER v13 PATCH — 3 changed files (overwrite, push, redeploy)
 =================================================================
-1. requirements.txt — telethon 1.40.0 -> 1.42.0. YOUR LOG HAD A FATAL
-   CRASH: TypeNotFoundError (Constructor ID 94345242) — a known 1.40 bug
-   when Telegram sends new TL objects in updates (yours came from the
-   CANTARELLA BYPASS GROUP). 1.42 parses it; no more 'ERROR fatal error'
-   crashes. (Render restarted and recovered via Mongo, but the crash is
-   now eliminated at the source.)
-2. botapi.py  — MULTI-TARGET commands:
-     /target    now ADDS a channel to your list (no longer replaces)
-     /targets   lists all targets with their resume points
-     /deltarget removes one (send its id or its list number)
-     /status shows the full targets list; /lastpost uses the first target
-3. db.py      — add_target/remove_target/get_targets helpers. Progress is
-   tracked PER channel, so every target resumes independently.
-4. bot.py     — scrape loop works through ALL targets: each pass picks the
-   channel with the oldest (least-scraped) progress, so channels are
-   scraped in turn. Legacy single-target config is auto-compatible.
-5. config.py  — NEW ENV: MEDIA_BOT (default @Rias_Gremory_Robot). The
-   media-fetching bot is no longer hardcoded — change it in Render env
-   vars anytime (e.g. MEDIA_BOT=@SomeOtherBot), no code edit needed.
-   flow.py   — uses MEDIA_BOT (imports it from config).
+  db.py      — targets are now {id, db_id} PAIRS: every target channel has
+               its OWN database channel. Legacy data auto-migrates (old
+               single target + /adddb fallback keep working). Progress is
+               per-channel and SURVIVES /deltarget (re-adding resumes).
+  botapi.py  — FIX: /adddb <id> (and all wizards) accept the id INLINE —
+               your '/adddb -1003998574377' was being swallowed before.
+               NEW two-step /target: asks channel id, then THAT channel's
+               DB channel. NEW /setdb (send: 2 -100999888777) to change a
+               target's DB later. /targets shows the full mapping with
+               resume points. /reset and /goto are PER-TARGET now
+               (/reset 2, /goto 2 120, or /goto <message link> — the link
+               auto-picks the right channel). NEW /help lists all 19
+               commands. Menu updated.
+  bot.py     — loop routes each post to its target's OWN db channel
+               (per-target db_id wins over the /adddb fallback) and shows
+               per-target lines in /progress. Caught-up channels re-scan
+               for new posts every 30 seconds.
 
-NOTE ON MEDIA_BOT: the link from Fubuki contains the bot's username, so
-the flow already opens whatever bot the link points to; MEDIA_BOT is the
-fallback/identity for that step. If your new chain names a different bot
-in the link, it will still work — the code follows the link's bot.
+AFTER DEPLOY (your plan):
+  /deltarget 1            -> remove old channel (progress kept)
+  /target                 -> channel id -> its DB channel id   (repeat per channel)
+  /targets                -> verify the mapping
+  /goto 2 50 or /goto <message link>   -> per-target start point
+  /start
 
-TO SWITCH TARGET CHANNEL: /deltarget (remove old) -> /target (add new)
--> /start. Each channel keeps its own progress in MongoDB.
+ANSWERS TO YOUR QUESTIONS:
+- Re-adding a removed channel RESUMES where it left off (not post 1);
+  if caught up it waits — new posts are detected within ~30 seconds.
+- /goto is safe with multiple targets: bare '/goto 3' is refused with a
+  picker when you have 2+ targets; use '/goto <number> <msg_id>' or a
+  message link (auto-detects the channel from the link).

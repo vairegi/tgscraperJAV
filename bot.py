@@ -46,8 +46,14 @@ def _fmt_ts(ts):
 
 async def fmt_progress():
     s = await DB.get_stats()
-    cfg = await DB.get_config()
-    tid = cfg.get("target_id")
+    targets = await DB.get_targets()
+    tlines = []
+    for i, t in enumerate(targets):
+        lp = await DB.get_last_post(t["id"])
+        rp = await DB.get_progress(t["id"])
+        tlines.append(f"  {i+1}. {t['id']} → DB {t.get('db_id') or '(fallback)'} "
+                      f"(resume {rp}, last scraped {lp})")
+    tid = targets[0]["id"] if targets else None
     last = await DB.get_progress(tid) if tid else 0
     last_post = await DB.get_last_post(tid) if tid else None
     fails = await DB.get_failures(5)
@@ -62,6 +68,9 @@ async def fmt_progress():
         f"\U0001F4AC SRT sent: {s.get('srt_sent', 0)}",
         f"\u274C Failures: {s.get('failures', 0)}",
     ]
+    if tlines:
+        lines.append("🎯 Targets:")
+        lines.extend(tlines)
     if fails:
         lines.append("— Recent failures —")
         for f in fails:
@@ -99,9 +108,13 @@ async def scrape_loop(sm):
             continue
         cfg = await DB.get_config()
         targets = await DB.get_targets()
-        missing = [k for k in ("bypass_id", "db_id") if not cfg.get(k)]
+        missing = []
+        if not cfg.get("bypass_id"):
+            missing.append("bypass_id")
         if not targets:
             missing.append("target (use /target)")
+        elif not cfg.get("db_id") and not all(t.get("db_id") for t in targets):
+            missing.append("db (set per-target with /setdb or a fallback with /adddb)")
         if missing:
             state.running = False
             if state.stage != "waiting config":
@@ -109,13 +122,17 @@ async def scrape_loop(sm):
                 state.stage = "waiting config"
             continue
         if not state.running:
-            log.info("scraper ACTIVE — targets=%s bypass=%s db=%s", targets, cfg["bypass_id"], cfg["db_id"])
+            log.info("scraper ACTIVE — targets=%s bypass=%s", targets, cfg["bypass_id"])
         state.running = True
         # rotate through targets: pick the one with the oldest progress
-        tprog = [(t, await DB.get_progress(t)) for t in targets]
-        target, last_id = min(tprog, key=lambda x: x[1])
+        tprog = [(t, await DB.get_progress(t["id"])) for t in targets]
+        tsel, last_id = min(tprog, key=lambda x: x[1])
+        target = tsel["id"]
+        cfg = dict(cfg)
+        cfg["target_id"] = target
+        cfg["db_id"] = tsel.get("db_id") or cfg.get("db_id")  # per-target DB wins
         if len(targets) > 1:
-            log.info("multi-target: %d channels, working on %s now", len(targets), target)
+            log.info("multi-target: %d channels, working on %s -> DB %s", len(targets), target, cfg["db_id"])
         if getattr(state, "_last_scan", None) != (target, last_id):
             log.info("scanning target %s from message id %s (oldest -> newest)", target, last_id)
             state._last_scan = (target, last_id)

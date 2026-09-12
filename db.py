@@ -1,4 +1,6 @@
-"""db.py — MongoDB (Motor) layer: config, progress, stats, failures."""
+"""db.py — MongoDB (Motor) layer: config, per-target progress, stats, failures.
+Targets are stored as a list of pairs: [{"id": <channel>, "db_id": <db channel>}]
+— each target channel has its OWN database channel."""
 import time
 from motor.motor_asyncio import AsyncIOMotorClient
 from config import MONGO_URI, DB_NAME
@@ -20,6 +22,56 @@ async def get_config(key=None):
     doc = await db().config.find_one({"_id": "config"}) or {}
     return doc.get(key) if key else doc
 
+# ---------------- targets (multi-channel, per-target DB) ----------------
+
+async def get_targets():
+    """List of {"id": ..., "db_id": ...|None}. Auto-migrates legacy shapes:
+    plain id list, or single target_id + global db_id."""
+    doc = await db().config.find_one({"_id": "config"}) or {}
+    out = []
+    for t in doc.get("targets") or []:
+        if isinstance(t, dict):
+            out.append({"id": t.get("id") or t.get("target_id"), "db_id": t.get("db_id")})
+        else:
+            out.append({"id": t, "db_id": None})
+    out = [t for t in out if t["id"] is not None]
+    if not out and doc.get("target_id"):
+        out = [{"id": doc["target_id"], "db_id": doc.get("db_id")}]
+    return out
+
+async def _save_targets(targets):
+    upd = {"targets": targets}
+    await db().config.update_one({"_id": "config"},
+        {"$set": {"targets": targets,
+                  "target_id": targets[0]["id"] if targets else None}}, upsert=True)
+    return targets
+
+async def add_target(tid, db_id=None):
+    targets = await get_targets()
+    for t in targets:
+        if t["id"] == tid:
+            if db_id is not None:
+                t["db_id"] = db_id
+            return await _save_targets(targets)
+    targets.append({"id": tid, "db_id": db_id})
+    return await _save_targets(targets)
+
+async def remove_target(tid):
+    """Remove from the active list. Progress is KEPT — re-adding later
+    resumes where it left off."""
+    targets = [t for t in await get_targets() if t["id"] != tid]
+    return await _save_targets(targets)
+
+async def set_target_db(tid, db_id):
+    targets = await get_targets()
+    for t in targets:
+        if t["id"] == tid:
+            t["db_id"] = db_id
+            return await _save_targets(targets)
+    return None  # target not found
+
+# ---------------- progress (per target id) ----------------
+
 async def get_progress(target_id):
     doc = await db().progress.find_one({"_id": str(target_id)})
     return (doc or {}).get("last_id", 0)
@@ -27,6 +79,19 @@ async def get_progress(target_id):
 async def set_progress(target_id, last_id):
     await db().progress.update_one({"_id": str(target_id)},
         {"$set": {"last_id": last_id, "ts": time.time()}}, upsert=True)
+
+async def reset_progress(target_id):
+    await db().progress.delete_one({"_id": str(target_id)})
+
+async def set_last_post(target_id, post_id):
+    await db().progress.update_one({"_id": str(target_id)},
+        {"$set": {"last_post": post_id}}, upsert=True)
+
+async def get_last_post(target_id):
+    doc = await db().progress.find_one({"_id": str(target_id)})
+    return (doc or {}).get("last_post")
+
+# ---------------- stats + failures ----------------
 
 async def incr(field, n=1):
     await db().stats.update_one({"_id": "stats"}, {"$inc": {field: n}}, upsert=True)
@@ -40,47 +105,9 @@ async def add_failure(post_id, stage, reason):
                                  "reason": str(reason)[:500], "ts": time.time()})
     await incr("failures")
     cnt = await d.failures.count_documents({})
-    if cnt > 50:  # keep last 50
+    if cnt > 50:
         ids = [x["_id"] async for x in d.failures.find().sort("ts", 1).limit(cnt - 50)]
         await d.failures.delete_many({"_id": {"$in": ids}})
 
 async def get_failures(limit=10):
     return [x async for x in db().failures.find().sort("ts", -1).limit(limit)]
-
-async def set_last_post(target_id, post_id):
-    await db().progress.update_one({"_id": str(target_id)},
-        {"$set": {"last_post": post_id}}, upsert=True)
-
-async def get_last_post(target_id):
-    doc = await db().progress.find_one({"_id": str(target_id)})
-    return (doc or {}).get("last_post")
-
-async def reset_progress(target_id):
-    """Clear progress + last_post for a target (next scan starts from msg 1)."""
-    await db().progress.delete_one({"_id": str(target_id)})
-
-async def add_target(tid):
-    """Add a target channel id to the list (no duplicates)."""
-    cfg = await db().config.find_one({"_id": "config"}) or {}
-    targets = cfg.get("targets", [])
-    if tid not in targets:
-        targets.append(tid)
-    await db().config.update_one({"_id": "config"},
-        {"$set": {"targets": targets, "target_id": targets[0]}}, upsert=True)
-    return targets
-
-async def remove_target(tid):
-    cfg = await db().config.find_one({"_id": "config"}) or {}
-    targets = [t for t in cfg.get("targets", []) if t != tid]
-    upd = {"targets": targets}
-    if cfg.get("target_id") == tid:
-        upd["target_id"] = targets[0] if targets else None
-    await db().config.update_one({"_id": "config"}, {"$set": upd}, upsert=True)
-    return targets
-
-async def get_targets():
-    cfg = await db().config.find_one({"_id": "config"}) or {}
-    ts = cfg.get("targets") or []
-    if not ts and cfg.get("target_id"):
-        ts = [cfg["target_id"]]  # legacy single-target compat
-    return ts
