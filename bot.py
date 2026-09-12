@@ -6,6 +6,7 @@ awaited' warnings). Py3.14-compatible event loop creation."""
 import asyncio, logging, sys, time
 from aiohttp import web
 from telethon.errors import FloodWaitError
+from config import POSTS_PER_ACCOUNT
 from session_manager import SessionManager
 from scraper import is_post, why_not_post
 from flow import process_post, state, Abort
@@ -83,11 +84,15 @@ async def start_health_server(port):
     log.info("health server on :%s", port)
 
 
-async def scrape_loop(client):
+async def scrape_loop(sm):
     """Scan target channel oldest->newest, processing real posts.
     Progress is persisted to MongoDB after EVERY message — a Render crash or
-    redeploy resumes from the exact same post."""
+    redeploy resumes from the exact same post. Rotates accounts every
+    POSTS_PER_ACCOUNT posts (and immediately on FloodWait): the next account
+    continues from the same Mongo progress, so the handoff is seamless."""
+    posts_on_account = 0
     while True:
+        client = sm.current()
         await asyncio.sleep(3)
         if not state.started or state.paused:
             state.running = False
@@ -124,14 +129,33 @@ async def scrape_loop(client):
                 try:
                     await process_post(client, cfg, msg)
                     await DB.set_progress(target, msg.id)
-                    log.info("post %s done", msg.id)
+                    posts_on_account += 1
+                    log.info("post %s done (%s, %d/%d on this account)", msg.id,
+                             sm.current_name(), posts_on_account, POSTS_PER_ACCOUNT)
+                    if sm.count() > 1 and posts_on_account >= POSTS_PER_ACCOUNT:
+                        old = sm.current_name()
+                        sm.rotate()
+                        posts_on_account = 0
+                        client = sm.current()
+                        log.info("ROTATE: %s rested -> now scraping with %s (continues from msg %s)",
+                                 old, sm.current_name(), msg.id)
                 except Abort:
                     await DB.add_failure(msg.id, state.stage, "skipped by user")
                     await DB.set_progress(target, msg.id)
                     state.abort = False
                 except FloodWaitError as e:
-                    # Telegram rate-limit mid-scrape: sleep in-process, retry SAME post.
-                    # If the wait is huge, park paused instead of burning a long sleep.
+                    # Rate limit on this account: rotate to the next (rested)
+                    # account immediately — it continues from the same progress.
+                    if sm.count() > 1:
+                        old = sm.current_name()
+                        sm.rotate()
+                        posts_on_account = 0
+                        log.warning("FloodWait %ds on %s — ROTATING to %s (post %s will be retried there)",
+                                    e.seconds, old, sm.current_name(), msg.id)
+                        break  # abandon this pass (its generator belongs to the
+                               # flooded account); next pass uses the new account
+                               # and resumes from saved progress -> same post retried
+                    # single account: sleep it out / park if huge
                     from config import FLOOD_MAX_WAIT, FLOOD_PARK
                     if e.seconds > FLOOD_MAX_WAIT:
                         state.paused = True
@@ -169,14 +193,15 @@ async def main():
     sm = SessionManager()
     client = await guarded(lambda: sm.start(), "userbot login")
     me = await client.get_me()
-    log.info("logged in as %s (%s)", me.first_name, me.id)
+    log.info("logged in as %s (%s) — %d account(s) loaded, rotating every %d posts",
+             me.first_name, me.id, sm.count(), POSTS_PER_ACCOUNT)
     # NOTE: userbot command handlers are DISABLED (bot-only replies).
     # commands.register(client)  <- uncomment to re-enable Saved-Messages commands
     await start_health_server(PORT)
     tasks = [
-        asyncio.ensure_future(scrape_loop(client)),
-        asyncio.ensure_future(client.run_until_disconnected()),
+        asyncio.ensure_future(scrape_loop(sm)),
     ]
+    tasks += [asyncio.ensure_future(c.run_until_disconnected()) for c in sm.all()]
     if BOT_TOKEN:
         ctl = await guarded(lambda: botapi.start(client), "control bot login")
         me_b = await ctl.get_me()

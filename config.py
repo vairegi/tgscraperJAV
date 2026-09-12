@@ -6,7 +6,14 @@ import os
 
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
-STRING_SESSION = os.environ["STRING_SESSION"]
+STRING_SESSION = os.environ.get("STRING_SESSION", "")
+# multi-account: comma-separated sessions; falls back to the single one
+SESSIONS = [x.strip() for x in os.environ.get("STRING_SESSIONS", "").split(",") if x.strip()]
+if not SESSIONS:
+    if not STRING_SESSION:
+        raise KeyError("Set STRING_SESSION or STRING_SESSIONS")
+    SESSIONS = [STRING_SESSION]
+POSTS_PER_ACCOUNT = int(os.environ.get("POSTS_PER_ACCOUNT", "20"))  # rotate after N posts
 MONGO_URI = os.environ["MONGO_URI"]
 
 # Control bot (BotFather) — powers the tappable "/" command menu
