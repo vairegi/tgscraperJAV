@@ -1,18 +1,26 @@
-TGSCRAPER v15 PATCH — 2 changed files (overwrite, push, redeploy)
+TGSCRAPER v16 PATCH — 1 changed file (overwrite, push, redeploy)
 =================================================================
-  forwarder.py — ACC2 MediaEmptyError FIXED. File references (msg.media)
-  are bound to the account that received them; acc2 re-sending acc1-
-  fetched media got MediaEmptyError on every post (your log: 99-114, all
-  at send_cover). Now media is downloaded to BYTES first, then re-uploaded
-  — no account binding, any rotating account can send. Tag-free copy mode,
-  spoiler + buttons + albums preserved, direct-resend fallback kept.
+  forwarder.py — fixes BOTH critical problems at once:
 
-  flow.py — MEDIA BOT NOW COLLECTS EVERYTHING: videos (any format incl
-  .mkv), .srt, images, stickers, other documents — all go to the DB
-  channel. Stats gain 'other_sent'. (Also fixes an 'other' NameError that
-  slipped into the split block.)
+  1) WRONG FORMAT: v15 re-uploaded videos from an in-memory buffer, which
+     drops video attributes — they arrived as generic documents (just a
+     download arrow, no duration/thumbnail/play). Now every file is
+     re-uploaded WITH its original document attributes (duration,
+     width/height, streaming support, filename) + its thumbnail, so videos
+     land in the DB channel in EXACTLY the format MEDIA_BOT sent (playable
+     inline, same name, same preview). Same for the cover post: same image,
+     spoiler kept, caption + buttons preserved, no forward tag.
 
-NOTE: bytes re-upload = a bit slower per post, but works on every account.
+  2) OUT OF MEMORY (512MB): v15 buffered each video fully in RAM via
+     BytesIO — a 700MB video killed the instance. Now media streams to a
+     TEMP FILE ON DISK (constant small memory regardless of file size) and
+     is deleted right after sending. RAM usage stays flat no matter how
+     big the video.
 
-AFTER DEPLOY — re-run the failed acc2 posts:
-  /goto https://t.me/c/<channel>/99   then   /start
+  Root cause of BOTH was the same v15 choice; this replaces it. Flow
+  (flow.py) unchanged — already collects all media types and sends cover
+  first. Account-rotation note: disk downloads use the fetching account's
+  session (which has the access hashes), so acc2 works too.
+
+AFTER DEPLOY: re-run any post that arrived as a plain document:
+  /goto <that post's link>  then  /start
