@@ -1,32 +1,27 @@
-TGSCRAPER v11 — MULTI-ACCOUNT ROTATION (3 changed files + gen_session.py)
-=========================================================================
-  session_manager.py — rewritten: loads ALL sessions, round-robin rotate().
-  config.py          — STRING_SESSIONS="sess1,sess2,..." (comma-separated);
-                       falls back to single STRING_SESSION unchanged.
-                       POSTS_PER_ACCOUNT=20 (rotation quota, env-tunable).
-  bot.py             — scrape_loop takes the SessionManager:
-                       * after POSTS_PER_ACCOUNT posts -> rotate to next
-                         account; the previous one rests while the next
-                         CONTINUES FROM THE SAME Mongo progress (no overlap,
-                         no re-scrape).
-                       * on FloodWait -> rotate IMMEDIATELY; the flooded post
-                         is retried by the fresh account. Single-account
-                         mode keeps the old sleep/park behavior.
-                       Log lines now show the account: "post 33 done
-                       (acc1/2, 17/20 on this account)" and "ROTATE: acc1/2
-                       rested -> now scraping with acc2/2".
-  gen_session.py     — run locally to mint StringSessions for extra accounts.
+TGSCRAPER v11.1 — CLEANER MULTI-ACCOUNT ENV VARS (1 file)
+==========================================================
+Just replaces config.py from v11 — everything else stays.
 
-SETUP (Render env):
-  STRING_SESSIONS = <session_acc1>,<session_acc2>
-  POSTS_PER_ACCOUNT = 20        (optional; default 20)
-  (Keep STRING_SESSION as acc1 or remove it — STRING_SESSIONS wins.)
+Instead of one comma-separated STRING_SESSIONS, use SEPARATE env vars:
 
-IMPORTANT: every account must be a MEMBER of the target channel AND the
-bypass group (with message permission), and ADMIN (post rights) in the DB
-channel — the rotating account does the clicking/sending/uploading.
+  STRING_SESSION   = <session for account 1>
+  STRING_SESSION2  = <session for account 2>
+  STRING_SESSION3  = <session for account 3>   (optional, up to 20)
 
-NOTE: rotation rotates the SCRAPER account. The control bot (@scrapjavbot)
-is unaffected. Both accounts messaging the SAME bypass group is fine, but
-if the bypass group rate-limits per-group rather than per-account, consider
-adding a second bypass group later — tell me and I'll wire rotation there too.
+That's it — the bot picks them up automatically in numeric order.
+Blank / missing slots are skipped; gaps are fine (SESSION + SESSION3 works).
+
+BACKWARD COMPATIBLE:
+- Only STRING_SESSION set  -> 1 account (same as before v11)
+- STRING_SESSIONS (comma)  -> still works as a fallback
+- Numbered slots win over STRING_SESSIONS if both are set
+
+RENDER SETUP (2 accounts, your case):
+  1. Env Vars page -> Add:
+       Key:   STRING_SESSION2
+       Value: <paste account-2 StringSession here>
+  2. Save -> Redeploy.
+  3. Log should say: "logged in as ... - 2 account(s) loaded, rotating every 20 posts"
+
+Both accounts must be MEMBER of target channel + bypass group (with message
+permission) and ADMIN in the DB channel (post rights).

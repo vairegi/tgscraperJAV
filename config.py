@@ -7,12 +7,28 @@ import os
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 STRING_SESSION = os.environ.get("STRING_SESSION", "")
-# multi-account: comma-separated sessions; falls back to the single one
-SESSIONS = [x.strip() for x in os.environ.get("STRING_SESSIONS", "").split(",") if x.strip()]
+
+# Multi-account rotation: set STRING_SESSION, STRING_SESSION2, STRING_SESSION3, ...
+# as separate Render env vars. They are collected here in order (SESSION first,
+# then SESSION2, SESSION3, ...). STRING_SESSIONS (comma-separated) still works
+# as a fallback for advanced users.
+def _collect_sessions():
+    picked = []
+    if STRING_SESSION.strip():
+        picked.append(STRING_SESSION.strip())
+    # numbered slots — probe up to 20, keep in numeric order
+    for i in range(2, 21):
+        v = os.environ.get(f"STRING_SESSION{i}", "").strip()
+        if v:
+            picked.append(v)
+    # legacy comma-separated fallback
+    if not picked:
+        picked = [x.strip() for x in os.environ.get("STRING_SESSIONS", "").split(",") if x.strip()]
+    return picked
+
+SESSIONS = _collect_sessions()
 if not SESSIONS:
-    if not STRING_SESSION:
-        raise KeyError("Set STRING_SESSION or STRING_SESSIONS")
-    SESSIONS = [STRING_SESSION]
+    raise KeyError("Set STRING_SESSION (and optionally STRING_SESSION2, STRING_SESSION3, ...)")
 POSTS_PER_ACCOUNT = int(os.environ.get("POSTS_PER_ACCOUNT", "20"))  # rotate after N posts
 MONGO_URI = os.environ["MONGO_URI"]
 
