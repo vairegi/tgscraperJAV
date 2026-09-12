@@ -1,7 +1,7 @@
 """flow.py — the full per-post chain:
 Download -> Fubuki Short link -> bypass group Open link -> Fubuki final link
 -> Rias bot videos+srt -> cover post + media to DB channel."""
-import asyncio, time
+import asyncio, logging, time
 from config import (BTN_DOWNLOAD, BTN_SHORT_LINK, BTN_OPEN_LINK, FUBUKI_BOT, MEDIA_BOT,
                     WAIT_BOT_REPLY, WAIT_BYPASS_REPLY, POLL_INTERVAL, STEP_DELAY)
 from scraper import find_button, parse_tg_start, first_url, norm, is_video_msg, is_srt_msg
@@ -20,6 +20,8 @@ class FlowState:
         self.paused = False
         self.started = False   # scraping runs ONLY after /start
         self.reset_gen = 0     # bumped by /reset and /goto -> aborts the current pass
+
+log = logging.getLogger("flow")
 
 state = FlowState()
 
@@ -66,8 +68,15 @@ async def _follow_button(msg, needle, client=None):
 
 async def _collect_media(client, entity, after_id, max_wait=90, quiet=5):
     """Collect videos + .srt documents arriving after after_id; stop after a
-    `quiet`-second gap (albums/multi-video) or max_wait."""
+    `quiet`-second gap (albums/multi-video) or max_wait.
+    v17 fix: the media bot posts its decorative stickers/text INSTANTLY but
+    takes many seconds to upload the actual video files (hundreds of MB).
+    A bare quiet-timer fired in the gap between the sticker burst and the
+    first video upload, and the DB channel silently got ONLY the stickers.
+    The quiet timer now only counts once at least one VIDEO has arrived,
+    and a collection with ZERO videos raises instead of archiving junk."""
     media, top, last_seen = [], after_id, time.time()
+    saw_video = False
     deadline = time.time() + max_wait
     while time.time() < deadline:
         if state.abort:
@@ -80,9 +89,17 @@ async def _collect_media(client, entity, after_id, max_wait=90, quiet=5):
             if m.media or m.photo or m.document or m.video or m.sticker:
                 media.append(m)
                 last_seen = time.time()
-        if media and time.time() - last_seen > quiet:
+                if is_video_msg(m):
+                    saw_video = True
+        # quiet-gap break is armed ONLY after a video is in hand — otherwise
+        # the fast sticker burst ends collection before videos finish uploading
+        if media and saw_video and time.time() - last_seen > quiet:
             break
         await asyncio.sleep(POLL_INTERVAL)
+    if media and not saw_video:
+        raise RuntimeError(
+            f"@{entity} sent {len(media)} message(s) but NO video within "
+            f"{max_wait}s (stickers/text only) — not archiving this post")
     return media
 
 async def process_post(client, cfg, msg):
@@ -167,6 +184,8 @@ async def process_post(client, cfg, msg):
     other = [m for m in media if not is_video_msg(m) and not is_srt_msg(m)]
     if not media:
         raise RuntimeError("bot sent no media")
+    log.info("collected %d msg(s): %d video + %d srt + %d other",
+             len(media), len(vids), len(srts), len(other))
 
     await asyncio.sleep(STEP_DELAY)
 

@@ -1,42 +1,42 @@
-TGSCRAPER v17 PATCH — 2 changed files (overwrite, push, redeploy)
-=================================================================
-  forwarder.py — delivery rewritten: copy-mode BY REFERENCE, no downloads.
-  README.md    — documents the new delivery (Crash resilience section).
+TGSCRAPER v17.1 PATCH — 2 changed files (overwrite, push, redeploy)
+===================================================================
+  flow.py   — FIX: DB channel got ONLY stickers, videos missing.
+  README.md — documents the fix.
 
-WHY: v16 downloaded every video to a temp file on the Render disk and
-re-uploaded it. Unnecessary — the userbot can deliver the cover post and
-the media bot's files to the DB channel WITHOUT downloading anything.
+SYMPTOM (your report): MEDIA_BOT delivered cover video + sticker burst +
+video files, but the DB channel received ONLY the stickers for that post.
 
-WHAT CHANGED:
-  - Every message is now re-sent with send_file(dbc, msg.media). Telethon
-    reuses the message's existing Telegram file reference, so Telegram
-    copies the file SERVER-TO-SERVER into the DB channel. The bytes never
-    touch the Render disk or RAM — stays flat even for 700MB+ videos.
-  - Still NO "Forwarded from" tag (this is a fresh send_file, never
-    forward_messages). Caption, spoiler flag, inline buttons, playable
-    video with thumbnail/duration/filename — all preserved exactly.
-  - REMOVED completely: tempfile, download_media, _download, _thumb, and
-    all filesystem cleanup logic (tmpdir creation, os.remove, os.rmdir).
-  - NEW: if Telegram reports a file reference expired (can happen on OLD
-    cover posts), the message is refetched from its source chat to get a
-    fresh reference and retried automatically (3 attempts, 5s backoff);
-    if it still fails, the error propagates so the failure is logged in
-    Mongo with stage+reason (visible via /progress).
-  - flow.py UNCHANGED — same send_cover / send_media calls, same order
-    (cover post first, then videos + srt + other).
+ROOT CAUSE (found in flow.py _collect_media): the media bot posts its
+decorative stickers + text INSTANTLY, then takes many seconds to upload
+the actual video files (hundreds of MB). Collection stopped after a
+5-second quiet gap — which fired in the pause BETWEEN the sticker burst
+and the first video upload finishing. Since cover+stickers had already
+been "collected", the flow archived exactly that: cover + stickers, no
+videos. Not a forwarder/v17-send problem — the send stage never got the
+videos at all. The 20s Fubuki timeout in your Render log was a separate
+hiccup on the post before this one.
+
+FIX:
+  - The quiet-gap timer is now ARMED ONLY after at least one VIDEO has
+    arrived — an early sticker burst can no longer end collection.
+  - If collection ends with messages but ZERO videos, the post FAILS
+    loudly ("N message(s) but NO video ... not archiving this post") and
+    is logged in Mongo (visible via /progress) — instead of silently
+    archiving sticker-only junk. It will be retried next scan (failed
+    posts don't advance last-post).
+  - Added one log line per post: "collected N msg(s): X video + Y srt +
+    Z other" so every post's delivery is verifiable in Render logs.
+  - Tunables unchanged and env-overridable: collection window 90s,
+    quiet gap 5s after the last video.
+
+  forwarder.py UNCHANGED (v17 reference-send is not the problem).
 
 TESTS (sandbox, mock Telethon — no network):
-  - py_compile forwarder.py + flow.py: OK
-  - 26 behavior tests: 26 PASS, 0 FAIL
-    (reference send with spoiler/caption/buttons kept; order preserved;
-     zero download_media / forward_messages / temp-file usage;
-     expired-reference refetch+retry; transient-failure backoff;
-     unrecoverable failure raises for logging; text-only fallback)
-  - NOT live-tested against Telegram (no session in sandbox) — the send
-    path uses the same documented send_file API as before, minus the
-    download/re-upload steps.
+  - py_compile all files: OK
+  - _collect_media behavior tests: stickers-first+late-video collects
+    videos correctly (regression for this bug); sticker-only collection
+    raises; quiet-gap after videos still stops collection. 8 PASS / 0 FAIL.
+  - NOT live-tested (no session in sandbox).
 
-AFTER DEPLOY, watch Render logs for one post:
-  "sending cover post to DB" -> "post N done" with no temp-file errors.
-If a very old post ever logs "file reference expired ... refetching",
-that is the new auto-recovery working, not an error.
+AFTER DEPLOY: the sticker-only DB entry needs one re-run:
+  /goto <that post's link>  then  /start
