@@ -51,8 +51,9 @@ async def fmt_progress():
     for i, t in enumerate(targets):
         lp = await DB.get_last_post(t["id"])
         rp = await DB.get_progress(t["id"])
+        flag = " ⏸PAUSED" if t.get("paused") else ""
         tlines.append(f"  {i+1}. {t['id']} → DB {t.get('db_id') or '(fallback)'} "
-                      f"(resume {rp}, last scraped {lp})")
+                      f"(resume {rp}, last scraped {lp}){flag}")
     tid = targets[0]["id"] if targets else None
     last = await DB.get_progress(tid) if tid else 0
     last_post = await DB.get_last_post(tid) if tid else None
@@ -108,6 +109,10 @@ async def scrape_loop(sm):
             continue
         cfg = await DB.get_config()
         targets = await DB.get_targets()
+        # per-target pause flags live in Mongo (survive restarts) — mirror them
+        # into memory every pass so /pause <n> /resume <n> work exactly like
+        # /goto's reset_gen pattern
+        state.paused_ids = {t["id"] for t in targets if t.get("paused")}
         missing = []
         if not cfg.get("bypass_id"):
             missing.append("bypass_id")
@@ -124,8 +129,18 @@ async def scrape_loop(sm):
         if not state.running:
             log.info("scraper ACTIVE — targets=%s bypass=%s", targets, cfg["bypass_id"])
         state.running = True
+        # rotate through ACTIVE targets only: individually paused channels are
+        # skipped entirely, the rest keep scraping
+        active = [t for t in targets if not t.get("paused")]
+        if not active:
+            state.running = False
+            if state.stage != "all targets paused":
+                log.info("every target is individually paused — waiting for /resume <n>")
+                state.stage = "all targets paused"
+            await asyncio.sleep(10)
+            continue
         # rotate through targets: pick the one with the oldest progress
-        tprog = [(t, await DB.get_progress(t["id"])) for t in targets]
+        tprog = [(t, await DB.get_progress(t["id"])) for t in active]
         tsel, last_id = min(tprog, key=lambda x: x[1])
         target = tsel["id"]
         cfg = dict(cfg)
@@ -145,9 +160,14 @@ async def scrape_loop(sm):
                     state.abort = False
                     break
                 if state.reset_gen != pass_gen:
-                    # /reset or /goto ran mid-pass — drop this pass NOW so the
-                    # next pass starts from the fresh progress (no clobbering)
-                    log.info("progress changed mid-pass (reset/goto) — restarting pass")
+                    # /reset, /goto, or /pause|/resume <n> ran mid-pass — drop
+                    # this pass NOW so the next pass re-reads fresh state
+                    log.info("state changed mid-pass (reset/goto/pause) — restarting pass")
+                    break
+                if target in state.paused_ids:
+                    # /pause <n> hit the channel currently being scraped —
+                    # abandon this pass and move to a still-active target
+                    log.info("target %s paused via /pause <n> — moving to next target", target)
                     break
                 if not is_post(msg):
                     log.info("skip msg %s (%s)", msg.id, why_not_post(msg))

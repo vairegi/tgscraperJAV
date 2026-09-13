@@ -31,12 +31,13 @@ async def get_targets():
     out = []
     for t in doc.get("targets") or []:
         if isinstance(t, dict):
-            out.append({"id": t.get("id") or t.get("target_id"), "db_id": t.get("db_id")})
+            out.append({"id": t.get("id") or t.get("target_id"), "db_id": t.get("db_id"),
+                        "paused": bool(t.get("paused", False))})
         else:
-            out.append({"id": t, "db_id": None})
+            out.append({"id": t, "db_id": None, "paused": False})
     out = [t for t in out if t["id"] is not None]
     if not out and doc.get("target_id"):
-        out = [{"id": doc["target_id"], "db_id": doc.get("db_id")}]
+        out = [{"id": doc["target_id"], "db_id": doc.get("db_id"), "paused": False}]
     return out
 
 async def _save_targets(targets):
@@ -67,6 +68,16 @@ async def set_target_db(tid, db_id):
     for t in targets:
         if t["id"] == tid:
             t["db_id"] = db_id
+            return await _save_targets(targets)
+    return None  # target not found
+
+async def set_target_paused(tid, paused):
+    """Per-target pause flag — persisted in Mongo so it survives Render
+    restarts, exactly like progress. Returns updated list, None if unknown."""
+    targets = await get_targets()
+    for t in targets:
+        if t["id"] == tid:
+            t["paused"] = bool(paused)
             return await _save_targets(targets)
     return None  # target not found
 

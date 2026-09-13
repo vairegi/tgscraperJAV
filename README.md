@@ -28,10 +28,10 @@ saves it. Add all three one by one, then tap `/start`.
 | `/target <id>` | set target channel |
 | `/bypass <id>` | set bypass group |
 | `/adddb <id>` | set database channel |
-| `/lastpost` | show the newest real post in the target channel |
+| `/lastpost [n]` | show the newest real post in target n (default 1) |
 | `/start` | start scraping |
-| `/pause` | pause — progress persisted in MongoDB (crash-safe) |
-| `/resume` | resume exactly from the last saved message id |
+| `/pause [n]` | pause — bare = ALL targets; `/pause 2` = only target 2, others keep scraping. Persisted in MongoDB (crash-safe) |
+| `/resume [n]` | bare = resume everything; `/resume 2` = resume only target 2 from its saved message id |
 | `/status` `/current` | live stage & current post |
 | `/progress` | posts done, **last scraped post**, resume point, media sent, failures + reasons |
 | `/ping` | check the bot is alive (works in control bot AND userbot) |

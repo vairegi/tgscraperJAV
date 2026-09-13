@@ -1,42 +1,48 @@
-TGSCRAPER v17.1 PATCH — 2 changed files (overwrite, push, redeploy)
-===================================================================
-  flow.py   — FIX: DB channel got ONLY stickers, videos missing.
-  README.md — documents the fix.
+TGSCRAPER v18 PATCH — 6 changed files (overwrite, push, redeploy)
+=================================================================
+  flow.py   — FlowState gains paused_ids (in-memory mirror of per-target
+              pause flags, synced from Mongo each pass by bot.py).
+  botapi.py — /pause <n> & /resume <n> (per-target), menu + /help updated,
+              /status shows individually paused targets, /cancel listed.
+  bot.py    — scrape loop skips individually-paused targets; per-target
+              pause flags mirrored from Mongo every pass; a pass aborts if
+              its channel gets paused mid-flight; /progress marks ⏸PAUSED.
+  db.py     — targets now carry a persisted "paused" flag + new
+              set_target_paused(); auto-migrates old records (default False).
+  README.md — command table updated for /pause [n], /resume [n], /lastpost [n].
 
-SYMPTOM (your report): MEDIA_BOT delivered cover video + sticker burst +
-video files, but the DB channel received ONLY the stickers for that post.
+WHY: you added a 2nd target and /resume scraped the OLD channel — with no
+per-target control the loop only ever worked the oldest-progress channel.
+Now: /pause 1 pauses ONLY target 1, /resume 2 resumes ONLY target 2,
+bare /pause /bare /resume still affect EVERYTHING (unchanged). Target
+numbers are the numbers shown by /targets. Flags persist in MongoDB —
+they survive Render crashes/restarts exactly like progress does. The new
+commands are in the tappable menu AND /help (and /cancel, which existed
+but was never listed, is now registered too).
 
-ROOT CAUSE (found in flow.py _collect_media): the media bot posts its
-decorative stickers + text INSTANTLY, then takes many seconds to upload
-the actual video files (hundreds of MB). Collection stopped after a
-5-second quiet gap — which fired in the pause BETWEEN the sticker burst
-and the first video upload finishing. Since cover+stickers had already
-been "collected", the flow archived exactly that: cover + stickers, no
-videos. Not a forwarder/v17-send problem — the send stage never got the
-videos at all. The 20s Fubuki timeout in your Render log was a separate
-hiccup on the post before this one.
+NOT changed (from your log — these are external, not bugs):
+  - ChannelPrivateError on posts 166-170: the userbot account lost access
+    to the BYPASS group (-1003563519821) — banned, removed, or the group
+    migrated. Fix on Telegram's side: re-join/re-add the account (with
+    POST permission), or point /bypass at a new group.
+  - "no matching reply in bypass group within 60s" on posts 161-165: the
+    bypass bot didn't answer. Raise WAIT_BYPASS_REPLY in Render env
+    (e.g. 120) if it stays slow. Same for WAIT_BOT_REPLY (Fubuki, 20s).
+  Both now fail loudly in /progress instead of looping silently.
 
-FIX:
-  - The quiet-gap timer is now ARMED ONLY after at least one VIDEO has
-    arrived — an early sticker burst can no longer end collection.
-  - If collection ends with messages but ZERO videos, the post FAILS
-    loudly ("N message(s) but NO video ... not archiving this post") and
-    is logged in Mongo (visible via /progress) — instead of silently
-    archiving sticker-only junk. It will be retried next scan (failed
-    posts don't advance last-post).
-  - Added one log line per post: "collected N msg(s): X video + Y srt +
-    Z other" so every post's delivery is verifiable in Render logs.
-  - Tunables unchanged and env-overridable: collection window 90s,
-    quiet gap 5s after the last video.
+TESTS (sandbox, mock Telethon/Motor — no network):
+  - py_compile all 10 files: OK
+  - db target pause/unpause, unknown-target -> None, legacy-record
+    migration: PASS
+  - botapi handlers driven via list_event_handlers with FakeEv:
+    /pause 2 pauses only target 2 (reply + Mongo flag + paused_ids);
+    /resume 2 resumes only it; /pause 9 rejected with listing; bare
+    /pause global; bare /resume clears global + all per-target flags;
+    /help lists pause/resume/cancel; menu registration includes
+    pause/resume descriptions. 26 PASS / 0 FAIL.
+  - scrape-loop target selection with one paused (async integration
+    against the real loop) NOT runnable in sandbox without live Mongo —
+    logic verified by unit tests on the selection predicate instead.
 
-  forwarder.py UNCHANGED (v17 reference-send is not the problem).
-
-TESTS (sandbox, mock Telethon — no network):
-  - py_compile all files: OK
-  - _collect_media behavior tests: stickers-first+late-video collects
-    videos correctly (regression for this bug); sticker-only collection
-    raises; quiet-gap after videos still stops collection. 8 PASS / 0 FAIL.
-  - NOT live-tested (no session in sandbox).
-
-AFTER DEPLOY: the sticker-only DB entry needs one re-run:
-  /goto <that post's link>  then  /start
+AFTER DEPLOY: /targets shows numbered channels; try /pause 2 then
+/progress — target 2 shows ⏸PAUSED and the loop keeps scraping target 1.

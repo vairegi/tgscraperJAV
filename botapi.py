@@ -28,13 +28,14 @@ _CMDS = [
     ("reset",    "Reset a target's progress to post 1"),
     ("lastpost", "Newest post in a target channel"),
     ("start",    "Start scraping"),
-    ("pause",    "Pause scraping"),
-    ("resume",   "Resume scraping"),
+    ("pause",    "Pause all, or one target: /pause 2"),
+    ("resume",   "Resume all, or one target: /resume 2"),
     ("status",   "Live stage & config"),
     ("current",  "Current post & stage"),
     ("progress", "Stats, last post, failure reasons"),
     ("skip",     "Skip current post"),
     ("stop",     "Stop the scraper"),
+    ("cancel",   "Cancel an active wizard prompt"),
 ]
 
 _pending = {}  # user_id -> (kind, extra)
@@ -127,6 +128,8 @@ def register(scrape_client):
             lines.append(f"/{c} — {d}")
         lines.append("\nTips: /target walks you through channel + its DB channel. "
                      "/goto accepts a message link (auto-picks the right target). "
+                     "/pause 2 pauses ONLY target 2 (see /targets for numbers), "
+                     "/resume 2 resumes it — bare /pause //resume affects ALL targets. "
                      "Caught-up channels re-scan for new posts every 30s.")
         await ev.reply("\n".join(lines))
 
@@ -295,7 +298,8 @@ def register(scrape_client):
         if not listing:
             await ev.reply("No target channels. Add one with /target")
             return
-        await ev.reply(listing + "\n\n/setdb to change a DB, /deltarget to remove.")
+        await ev.reply(listing + "\n\n/setdb to change a DB, /deltarget to remove, "
+                                 "/pause <n> //resume <n> to pause/resume one target.")
 
     @bot.on(events.NewMessage(pattern=r"^/lastpost(?:\s+(\d+))?$"))
     async def lastpost(ev):
@@ -353,24 +357,72 @@ def register(scrape_client):
         await ev.reply("▶️ Scraper started. It scans each target from its saved point.\n"
                        "Check /progress anytime.")
 
-    @bot.on(events.NewMessage(pattern=r"^/pause$"))
+    @bot.on(events.NewMessage(pattern=r"^/(pause|resume)(?:\s+(\d+))?$"))
     async def pause_cmd(ev):
-        if _admin(ev.sender_id):
-            state.paused = True
-            await ev.reply("⏸ Paused. Progress is saved in MongoDB — safe even if Render crashes. /resume to continue.")
-
-    @bot.on(events.NewMessage(pattern=r"^/resume$"))
-    async def resume_cmd(ev):
-        if _admin(ev.sender_id):
+        if not _admin(ev.sender_id):
+            return
+        action = ev.pattern_match.group(1)
+        n = ev.pattern_match.group(2)
+        if action == "pause":
+            if n is None:
+                # bare /pause — global pause (unchanged behavior)
+                state.paused = True
+                await ev.reply("⏸ Paused. Progress is saved in MongoDB — safe even if "
+                               "Render crashes. /resume to continue.")
+                return
+            targets = await DB.get_targets()
+            if not (1 <= int(n) <= len(targets)):
+                await ev.reply((await _list_targets_text() or "No targets set.") +
+                               f"\n\n⚠️ Target number must be 1-{len(targets)} (see /targets).")
+                return
+            t = targets[int(n) - 1]
+            if t.get("paused"):
+                await ev.reply(f"⏸ Target {n} ({t['id']}) is already paused.")
+                return
+            await DB.set_target_paused(t["id"], True)
+            state.paused_ids.add(t["id"])          # loop sees it within seconds
+            state.reset_gen += 1; state._last_scan = None  # drop the current pass
+            await ev.reply(f"⏸ Target {n} ({t['id']}) paused — other targets keep scraping.\n"
+                           f"/resume {n} to resume this one.")
+            return
+        # ---- /resume ----
+        if n is None:
+            # bare /resume — resume EVERYTHING: global flag + all per-target flags
             state.paused = False; state.abort = False; state.started = True
-            await ev.reply("▶️ Resumed from saved progress.")
+            targets = await DB.get_targets()
+            unpaused = 0
+            for t in targets:
+                if t.get("paused"):
+                    await DB.set_target_paused(t["id"], False)
+                    unpaused += 1
+            state.paused_ids.clear()
+            state.reset_gen += 1; state._last_scan = None
+            msg = "▶️ Resumed from saved progress."
+            if unpaused:
+                msg += f" ({unpaused} individually-paused target(s) resumed too.)"
+            await ev.reply(msg)
+            return
+        targets = await DB.get_targets()
+        if not (1 <= int(n) <= len(targets)):
+            await ev.reply((await _list_targets_text() or "No targets set.") +
+                           f"\n\n⚠️ Target number must be 1-{len(targets)} (see /targets).")
+            return
+        t = targets[int(n) - 1]
+        await DB.set_target_paused(t["id"], False)
+        state.paused_ids.discard(t["id"])
+        state.paused = False; state.abort = False; state.started = True
+        state.reset_gen += 1; state._last_scan = None
+        rp = await DB.get_progress(t["id"])
+        await ev.reply(f"▶️ Target {n} ({t['id']}) resumed — continues from message id {rp}.")
 
     @bot.on(events.NewMessage(pattern=r"^/(status|current)$"))
     async def status_cmd(ev):
         if _admin(ev.sender_id):
             cfg = await DB.get_config()
             listing = await _list_targets_text() or "  (none)"
-            await ev.reply(f"🤖 Running: {state.running} | Paused: {state.paused}\n"
+            ind = sorted(str(i + 1) for i, t in enumerate(await DB.get_targets()) if t.get("paused"))
+            await ev.reply(f"🤖 Running: {state.running} | Paused: {state.paused}"
+                           + (f" | Individually paused targets: {', '.join(ind)}" if ind else "") + "\n"
                            f"📍 Stage: {state.stage}\n📄 Current post: {state.current_post}\n"
                            f"{listing}\n🔁 Bypass: {cfg.get('bypass_id')}\n"
                            f"🗄 Fallback DB: {cfg.get('db_id')}")

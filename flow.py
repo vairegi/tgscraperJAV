@@ -20,6 +20,7 @@ class FlowState:
         self.paused = False
         self.started = False   # scraping runs ONLY after /start
         self.reset_gen = 0     # bumped by /reset and /goto -> aborts the current pass
+        self.paused_ids = set()  # target ids paused via /pause <n> (synced from Mongo)
 
 log = logging.getLogger("flow")
 
