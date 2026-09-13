@@ -27,6 +27,8 @@ saves it. Add all three one by one, then tap `/start`.
 |---|---|
 | `/target <id>` | set target channel |
 | `/bypass <id>` | set bypass group |
+| `/linkbutton [text]` | list LINK_BOT button labels, or add one — matched immediately, **no restart** |
+| `/removelinkbutton <n>` | remove custom label #n (see `/linkbutton` for numbers) |
 | `/adddb <id>` | set database channel |
 | `/lastpost [n]` | show the newest real post in target n (default 1) |
 | `/start` | start scraping |

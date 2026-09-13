@@ -81,6 +81,37 @@ async def set_target_paused(tid, paused):
             return await _save_targets(targets)
     return None  # target not found
 
+# ---------------- custom LINK_BOT button labels ----------------
+# Owner-managed via /linkbutton in the control bot. The userbot matches the
+# LINK_BOT link button against the built-in default (config.BTN_SHORT_LINK)
+# PLUS every label in this list — so a bot button rename never needs a
+# redeploy, just /linkbutton <new text>.
+
+async def get_link_buttons():
+    doc = await db().config.find_one({"_id": "config"}) or {}
+    return list(doc.get("link_buttons") or [])
+
+async def add_link_button(label):
+    """Append a label; returns (list, added?). De-dupes with the same
+    Unicode-fold the matcher uses, so 'Get Link' and '𝗚𝗲𝘁 𝗟𝗶𝗻𝗸' are one entry."""
+    from scraper import norm
+    buttons = await get_link_buttons()
+    if any(norm(b) == norm(label) for b in buttons):
+        return buttons, False
+    buttons.append(label)
+    await set_config("link_buttons", buttons)
+    return buttons, True
+
+async def remove_link_button(n):
+    """Remove label #n (1-based, the numbering shown by /linkbutton).
+    Returns (list, removed_label), or None if n is out of range."""
+    buttons = await get_link_buttons()
+    if not (1 <= n <= len(buttons)):
+        return None
+    removed = buttons.pop(n - 1)
+    await set_config("link_buttons", buttons)
+    return buttons, removed
+
 # ---------------- progress (per target id) ----------------
 
 async def get_progress(target_id):

@@ -18,11 +18,15 @@ def norm(text):
 
 
 def find_button(msg, needle):
-    """Return (row, col, button) whose normalized text CONTAINS the needle."""
-    needle = norm(needle)
+    """Return (row, col, button) whose normalized text CONTAINS the needle.
+    needle may be a single string or a list of aliases — the first alias
+    found wins (custom /linkbutton labels are passed as a list)."""
+    needles = [needle] if isinstance(needle, str) else list(needle)
+    needles = [norm(n) for n in needles if n]
     for r, row in enumerate(msg.buttons or []):
         for c, b in enumerate(row):
-            if needle in norm(getattr(b, "text", "")):
+            t = norm(getattr(b, "text", ""))
+            if any(n in t for n in needles):
                 return r, c, b
     return None
 

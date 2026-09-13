@@ -26,6 +26,14 @@ log = logging.getLogger("flow")
 
 state = FlowState()
 
+
+async def _link_btn_labels():
+    """Labels that identify LINK_BOT's link button: the built-in default plus
+    every custom label the owner added via /linkbutton (Mongo-backed, active
+    immediately — no redeploy when the bot renames its buttons)."""
+    custom = await DB.get_link_buttons()
+    return [BTN_SHORT_LINK] + [b for b in custom if norm(b) != norm(BTN_SHORT_LINK)]
+
 async def _last_id(client, entity):
     msgs = await client.get_messages(entity, limit=1)
     return msgs[0].id if msgs else 0
@@ -117,11 +125,12 @@ async def process_post(client, cfg, msg):
     # 2) Fubuki sends the linked message (Short link button) — or a link in
     #    text; if it answered with the generic welcome, re-send /start once
     state.stage = "waiting Fubuki short-link message"
+    labels = await _link_btn_labels()
     fm = None
     for attempt in (1, 2):
         try:
             fm = await _wait_new(client, FUBUKI_BOT, base_f, WAIT_BOT_REPLY,
-                                 need_button=BTN_SHORT_LINK)
+                                 need_button=labels)
         except TimeoutError:
             try:
                 fm = await _wait_new(client, FUBUKI_BOT, base_f, 10, need_text="http")
@@ -133,13 +142,15 @@ async def process_post(client, cfg, msg):
             await client.send_message(FUBUKI_BOT, "/start")  # nudge after welcome
             base_f = await _last_id(client, FUBUKI_BOT)
     if not fm:
-        raise RuntimeError("Fubuki sent neither a Short link button nor a link")
+        raise RuntimeError(
+            f"Fubuki sent neither a link button nor a link "
+            f"(wanted one of {labels} — add the new label with /linkbutton)")
 
     # 3) activate 'Short link' (or take the link straight from the text)
     state.stage = "getting short link"
     short_link = first_url(fm.text or "")
     if not short_link:
-        res, b = await _follow_button(fm, BTN_SHORT_LINK, client)
+        res, b = await _follow_button(fm, labels, client)
         short_link = getattr(b, "url", None) or (res if isinstance(res, str) and "http" in res else None)
     if not short_link:
         lm = await _wait_new(client, FUBUKI_BOT, await _last_id(client, FUBUKI_BOT),

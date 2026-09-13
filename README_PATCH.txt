@@ -1,48 +1,39 @@
-TGSCRAPER v18 PATCH — 6 changed files (overwrite, push, redeploy)
+TGSCRAPER v19 PATCH — 5 changed files (overwrite, push, redeploy)
 =================================================================
-  flow.py   — FlowState gains paused_ids (in-memory mirror of per-target
-              pause flags, synced from Mongo each pass by bot.py).
-  botapi.py — /pause <n> & /resume <n> (per-target), menu + /help updated,
-              /status shows individually paused targets, /cancel listed.
-  bot.py    — scrape loop skips individually-paused targets; per-target
-              pause flags mirrored from Mongo every pass; a pass aborts if
-              its channel gets paused mid-flight; /progress marks ⏸PAUSED.
-  db.py     — targets now carry a persisted "paused" flag + new
-              set_target_paused(); auto-migrates old records (default False).
-  README.md — command table updated for /pause [n], /resume [n], /lastpost [n].
+  botapi.py — NEW /linkbutton & /removelinkbutton commands (menu + /help).
+  flow.py   — LINK_BOT link-button matching uses defaults + your custom
+              labels; the failure message now names the exact labels tried.
+  db.py     — link_buttons list in Mongo + add/remove helpers (de-duped).
+  scraper.py— find_button accepts a LIST of aliases (first match wins).
+  README.md — command table updated.
 
-WHY: you added a 2nd target and /resume scraped the OLD channel — with no
-per-target control the loop only ever worked the oldest-progress channel.
-Now: /pause 1 pauses ONLY target 1, /resume 2 resumes ONLY target 2,
-bare /pause /bare /resume still affect EVERYTHING (unchanged). Target
-numbers are the numbers shown by /targets. Flags persist in MongoDB —
-they survive Render crashes/restarts exactly like progress does. The new
-commands are in the tappable menu AND /help (and /cancel, which existed
-but was never listed, is now registered too).
+WHY: LINK_BOT renamed its "Short link" button -> posts failed with
+"Fubuki sent neither a Short link button nor a link". Instead of shipping
+a new zip per rename, labels are now OWNER-MANAGED AT RUNTIME:
 
-NOT changed (from your log — these are external, not bugs):
-  - ChannelPrivateError on posts 166-170: the userbot account lost access
-    to the BYPASS group (-1003563519821) — banned, removed, or the group
-    migrated. Fix on Telegram's side: re-join/re-add the account (with
-    POST permission), or point /bypass at a new group.
-  - "no matching reply in bypass group within 60s" on posts 161-165: the
-    bypass bot didn't answer. Raise WAIT_BYPASS_REPLY in Render env
-    (e.g. 120) if it stays slow. Same for WAIT_BOT_REPLY (Fubuki, 20s).
-  Both now fail loudly in /progress instead of looping silently.
+  /linkbutton "Get Link 🔗"   add a label (quotes optional) — active on the
+                              very next post, NO restart/redeploy
+  /linkbutton                 list: built-in default + your numbered labels
+  /removelinkbutton 1         remove label #1 (numbers from /linkbutton)
 
-TESTS (sandbox, mock Telethon/Motor — no network):
+Matching is unchanged otherwise: case-insensitive partial match after
+Unicode-folding (fancy fonts like 𝗚𝗲𝘁 𝗟𝗶𝗻𝗸 match plain "get link"),
+de-duped so variants don't pile up. Labels live in MongoDB — they survive
+Render restarts. The built-in "short link" label always stays active.
+
+The 60s bypass timeout in your last log was NOT this bug — the tagger was
+just slow (bypass button is still "Open link"). If it repeats, raise
+WAIT_BYPASS_REPLY (e.g. 120) in Render env.
+
+TESTS (sandbox, mock Telethon + in-memory Mongo, no network):
   - py_compile all 10 files: OK
-  - db target pause/unpause, unknown-target -> None, legacy-record
-    migration: PASS
-  - botapi handlers driven via list_event_handlers with FakeEv:
-    /pause 2 pauses only target 2 (reply + Mongo flag + paused_ids);
-    /resume 2 resumes only it; /pause 9 rejected with listing; bare
-    /pause global; bare /resume clears global + all per-target flags;
-    /help lists pause/resume/cancel; menu registration includes
-    pause/resume descriptions. 26 PASS / 0 FAIL.
-  - scrape-loop target selection with one paused (async integration
-    against the real loop) NOT runnable in sandbox without live Mongo —
-    logic verified by unit tests on the selection predicate instead.
+  - db: add/de-dupe (fancy-font twin rejected)/remove/out-of-range: PASS
+  - scraper.find_button: list aliases match any label, first match wins,
+    no-match returns None, single-string behavior unchanged: PASS
+  - botapi: /linkbutton add (quoted + unquoted), duplicate rejected, list
+    empty + populated, /removelinkbutton by number + out-of-range,
+    /help + menu contain both commands: PASS
+  - 25 PASS / 0 FAIL. NOT live-tested against Telegram (no session).
 
-AFTER DEPLOY: /targets shows numbered channels; try /pause 2 then
-/progress — target 2 shows ⏸PAUSED and the loop keeps scraping target 1.
+AFTER DEPLOY: /linkbutton <the new button's exact text> — done. Verify
+with /linkbutton, then watch one post: it should pass "getting short link".

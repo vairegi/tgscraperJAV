@@ -7,7 +7,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import MemorySession
 from telethon.tl.functions.bots import SetBotCommandsRequest
 from telethon.tl.types import BotCommand, BotCommandScopeDefault
-from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_USER_ID
+from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_USER_ID, BTN_SHORT_LINK
 import re
 import db as DB
 from flow import state
@@ -24,6 +24,8 @@ _CMDS = [
     ("setdb",    "Change a target's DB channel"),
     ("adddb",    "Set the fallback DB channel"),
     ("bypass",   "Set bypass group"),
+    ("linkbutton", "List or add LINK_BOT button labels (no restart)"),
+    ("removelinkbutton", "Remove a LINK_BOT button label by number"),
     ("goto",     "Set a target's start message (/goto <n> <msg> or link)"),
     ("reset",    "Reset a target's progress to post 1"),
     ("lastpost", "Newest post in a target channel"),
@@ -130,6 +132,8 @@ def register(scrape_client):
                      "/goto accepts a message link (auto-picks the right target). "
                      "/pause 2 pauses ONLY target 2 (see /targets for numbers), "
                      "/resume 2 resumes it — bare /pause //resume affects ALL targets. "
+                     "When LINK_BOT renames its button: /linkbutton <new text> — "
+                     "active instantly, no restart. "
                      "Caught-up channels re-scan for new posts every 30s.")
         await ev.reply("\n".join(lines))
 
@@ -138,6 +142,56 @@ def register(scrape_client):
         if _admin(ev.sender_id):
             await ev.reply(f"🏓 Pong — control bot + scraper alive.\n"
                            f"📍 Stage: {state.stage} | Running: {state.running} | Paused: {state.paused}")
+
+    # ---------- LINK_BOT button labels (Mongo-backed, no restart) ----------
+    @bot.on(events.NewMessage(pattern=r"^/linkbutton(?:\s+(.+))?$"))
+    async def linkbutton_cmd(ev):
+        if not _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        if arg:
+            # strip surrounding quotes if the owner wrapped the label
+            if len(arg) > 1 and arg[0] in '"\'' and arg[-1] == arg[0]:
+                arg = arg[1:-1].strip()
+            if not arg:
+                await ev.reply("⚠️ Empty label. Usage: /linkbutton <button text>")
+                return
+            buttons, added = await DB.add_link_button(arg)
+            if added:
+                await ev.reply(f"✅ Button label added: {arg}\n"
+                               f"LINK_BOT link button now matches: "
+                               f"{BTN_SHORT_LINK} (built-in) + {len(buttons)} custom label(s). "
+                               f"Active immediately — /linkbutton to list, /removelinkbutton <n> to remove.")
+            else:
+                await ev.reply(f"⚠️ '{arg}' is already in the list (see /linkbutton).")
+            return
+        buttons = await DB.get_link_buttons()
+        lines = [f"🔗 LINK_BOT button labels (built-in: '{BTN_SHORT_LINK}' — always active):"]
+        if buttons:
+            lines += [f"  {i+1}. {b}" for i, b in enumerate(buttons)]
+            lines.append("\n/linkbutton <text> to add, /removelinkbutton <n> to remove.")
+        else:
+            lines.append("  (no custom labels yet)")
+            lines.append("\nIf LINK_BOT renamed its button: /linkbutton <exact new text> — "
+                         "the userbot matches it on the next post, no restart needed.")
+        await ev.reply("\n".join(lines))
+
+    @bot.on(events.NewMessage(pattern=r"^/removelinkbutton(?:\s+(\d+))?$"))
+    async def removelinkbutton_cmd(ev):
+        if not _admin(ev.sender_id):
+            return
+        n = ev.pattern_match.group(1)
+        if not n:
+            await ev.reply("Usage: /removelinkbutton <number> — see /linkbutton for the numbered list.")
+            return
+        r = await DB.remove_link_button(int(n))
+        if r is None:
+            buttons = await DB.get_link_buttons()
+            await ev.reply(f"⚠️ Number must be 1-{len(buttons)} (see /linkbutton).")
+            return
+        buttons, removed = r
+        await ev.reply(f"🗑 Removed label {n}: {removed}\n"
+                       f"{len(buttons)} custom label(s) left (built-in '{BTN_SHORT_LINK}' is always active).")
 
     # ---------- wizards (all accept inline args too) ----------
     @bot.on(events.NewMessage(pattern=r"^/target(?:\s+(.+))?$"))
