@@ -28,6 +28,8 @@ saves it. Add all three one by one, then tap `/start`.
 | `/target <id>` | set target channel |
 | `/bypass <id>` | set bypass group |
 | `/linkbutton [text]` | list LINK_BOT button labels, or add one — matched immediately, **no restart** |
+
+Each target's LINK_BOT is discovered per-post from the Download button's own `t.me/<bot>?start=...` URL, and MEDIA_BOT is discovered from LINK_BOT's final reply — so different target channels can use completely different bot pairs with no config.
 | `/removelinkbutton <n>` | remove custom label #n (see `/linkbutton` for numbers) |
 | `/adddb <id>` | set database channel |
 | `/lastpost [n]` | show the newest real post in target n (default 1) |

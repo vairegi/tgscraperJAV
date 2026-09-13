@@ -56,6 +56,10 @@ BTN_DOWNLOAD = "download"
 BTN_SHORT_LINK = "short link"
 BTN_OPEN_LINK = "open link"
 
-# Known bots in the chain
-FUBUKI_BOT = os.environ.get("FUBUKI_BOT", "@Fubuki_xRobot")
-MEDIA_BOT = os.environ.get("MEDIA_BOT", "@Rias_Gremory_Robot")  # bot that serves videos+srt
+# Known bots — v20: OPTIONAL fallbacks only. flow.py now discovers LINK_BOT
+# from each post's Download-button URL and MEDIA_BOT from LINK_BOT's final
+# reply, so different targets can use different bot pairs with no config.
+# These env vars stay as a safety net for weird posts whose Download button
+# isn't a t.me deep link.
+FUBUKI_BOT = os.environ.get("FUBUKI_BOT", "") or None
+MEDIA_BOT = os.environ.get("MEDIA_BOT", "") or None

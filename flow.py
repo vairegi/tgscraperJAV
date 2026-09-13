@@ -1,6 +1,14 @@
-"""flow.py — the full per-post chain:
-Download -> Fubuki Short link -> bypass group Open link -> Fubuki final link
--> Rias bot videos+srt -> cover post + media to DB channel."""
+"""flow.py — the full per-post chain, PER-TARGET bot discovery:
+Download button (t.me/<LINK_BOT>?start=...) -> LINK_BOT link message ->
+bypass group Open link -> LINK_BOT final message (t.me/<MEDIA_BOT>?start=...)
+-> MEDIA_BOT videos+srt -> cover post + media to DB channel.
+
+v20: LINK_BOT and MEDIA_BOT are no longer hardcoded from env vars — each
+target channel's Download button ALREADY points at its own LINK_BOT, and
+LINK_BOT's final reply names its own MEDIA_BOT. So targets that use
+different bots (Hanime Alliance vs I-ANIME etc.) all work with a single
+scraper session, and adding a new channel with a new bot pair needs
+ZERO config — just /target and go."""
 import asyncio, logging, time
 from config import (BTN_DOWNLOAD, BTN_SHORT_LINK, BTN_OPEN_LINK, FUBUKI_BOT, MEDIA_BOT,
                     WAIT_BOT_REPLY, WAIT_BYPASS_REPLY, POLL_INTERVAL, STEP_DELAY)
@@ -59,8 +67,10 @@ async def _follow_button(msg, needle, client=None):
     - URL buttons deep-linking to a bot (t.me/<bot>?start=<payload>): send
       '/start <payload>' to that bot — a bare click fires plain /start, which
       only gets the bot's generic welcome instead of the linked content.
-    - other URL buttons: return the URL.
-    - callback buttons: real msg.click(). Returns (result, button)."""
+      Returns (url, button, bot_username) so callers can learn WHICH bot
+      this deep link addressed (used for per-target LINK_BOT discovery).
+    - other URL buttons: return (url, button, None).
+    - callback buttons: real msg.click(). Returns (result, button, None)."""
     found = find_button(msg, needle)
     if not found:
         raise RuntimeError(f"button '{needle}' not found")
@@ -70,10 +80,10 @@ async def _follow_button(msg, needle, client=None):
         bot, payload = parse_tg_start(url)
         if bot and client is not None:
             await client.send_message(bot, f"/start {payload}" if payload else "/start")
-            return url, b
-        return url, b
+            return url, b, bot
+        return url, b, bot
     res = await msg.click(i=c, j=r)
-    return res, b
+    return res, b, None
 
 async def _collect_media(client, entity, after_id, max_wait=90, quiet=5):
     """Collect videos + .srt documents arriving after after_id; stop after a
@@ -111,49 +121,75 @@ async def _collect_media(client, entity, after_id, max_wait=90, quiet=5):
             f"{max_wait}s (stickers/text only) — not archiving this post")
     return media
 
+def _peek_link_bot(msg):
+    """Read the LINK_BOT username from the Download button's URL WITHOUT
+    clicking it — so we know which chat to wait on before the button fires."""
+    found = find_button(msg, BTN_DOWNLOAD)
+    if not found:
+        return None
+    _, _, b = found
+    url = getattr(b, "url", None) or ""
+    bot, _ = parse_tg_start(url)
+    return bot
+
+
 async def process_post(client, cfg, msg):
     target, bypass, dbc = cfg["target_id"], cfg["bypass_id"], cfg["db_id"]
 
-    # 1) click Download on the target post — WITH its start payload, so Fubuki
+    # LINK_BOT is DISCOVERED from THIS post's Download button (per target).
+    # The env-var FUBUKI_BOT stays only as a last-resort fallback for weird
+    # posts where the button isn't a t.me deep link.
+    link_bot = _peek_link_bot(msg) or FUBUKI_BOT
+    if not link_bot:
+        raise RuntimeError(
+            "Download button carries no t.me/<bot>?start=... link and no "
+            "FUBUKI_BOT fallback is set — cannot determine LINK_BOT for this post")
+    log.info("post %s: LINK_BOT=@%s (from Download button)", msg.id, link_bot)
+
+    # 1) click Download on the target post — WITH its start payload, so LINK_BOT
     #    serves the linked content instead of its generic welcome message
-    state.stage = "clicking Download"
-    base_f = await _last_id(client, FUBUKI_BOT)
-    await _follow_button(msg, BTN_DOWNLOAD, client)
+    state.stage = f"clicking Download (LINK_BOT=@{link_bot})"
+    base_f = await _last_id(client, link_bot)
+    _, _, followed_bot = await _follow_button(msg, BTN_DOWNLOAD, client)
+    if followed_bot and followed_bot != link_bot:
+        # button URL parsed differently than the peek — trust the follow result
+        link_bot = followed_bot
+        base_f = await _last_id(client, link_bot)
 
     await asyncio.sleep(STEP_DELAY)
 
-    # 2) Fubuki sends the linked message (Short link button) — or a link in
+    # 2) LINK_BOT sends the linked message (Short link button) — or a link in
     #    text; if it answered with the generic welcome, re-send /start once
-    state.stage = "waiting Fubuki short-link message"
+    state.stage = f"waiting @{link_bot} short-link message"
     labels = await _link_btn_labels()
     fm = None
     for attempt in (1, 2):
         try:
-            fm = await _wait_new(client, FUBUKI_BOT, base_f, WAIT_BOT_REPLY,
+            fm = await _wait_new(client, link_bot, base_f, WAIT_BOT_REPLY,
                                  need_button=labels)
         except TimeoutError:
             try:
-                fm = await _wait_new(client, FUBUKI_BOT, base_f, 10, need_text="http")
+                fm = await _wait_new(client, link_bot, base_f, 10, need_text="http")
             except TimeoutError:
                 fm = None  # welcome-only round -> fall through to the retry nudge
         if fm:
             break
         if attempt == 1:
-            await client.send_message(FUBUKI_BOT, "/start")  # nudge after welcome
-            base_f = await _last_id(client, FUBUKI_BOT)
+            await client.send_message(link_bot, "/start")  # nudge after welcome
+            base_f = await _last_id(client, link_bot)
     if not fm:
         raise RuntimeError(
-            f"Fubuki sent neither a link button nor a link "
+            f"@{link_bot} sent neither a link button nor a link "
             f"(wanted one of {labels} — add the new label with /linkbutton)")
 
     # 3) activate 'Short link' (or take the link straight from the text)
     state.stage = "getting short link"
     short_link = first_url(fm.text or "")
     if not short_link:
-        res, b = await _follow_button(fm, labels, client)
+        res, b, _ = await _follow_button(fm, labels, client)
         short_link = getattr(b, "url", None) or (res if isinstance(res, str) and "http" in res else None)
     if not short_link:
-        lm = await _wait_new(client, FUBUKI_BOT, await _last_id(client, FUBUKI_BOT),
+        lm = await _wait_new(client, link_bot, await _last_id(client, link_bot),
                              WAIT_BOT_REPLY, need_text="http")
         short_link = first_url(lm.text)
     if not short_link:
@@ -166,21 +202,34 @@ async def process_post(client, cfg, msg):
     sent = await client.send_message(bypass, short_link)
     bm = await _wait_new(client, bypass, sent.id, WAIT_BYPASS_REPLY, need_button=BTN_OPEN_LINK)
 
-    # 5) click 'Open link' -> deep link back into Fubuki
-    state.stage = "clicking Open link"
+    # 5) click 'Open link' -> deep link back into LINK_BOT (SAME bot as step 2)
+    state.stage = f"clicking Open link (back to @{link_bot})"
     # _follow_button already follows tg deep links (sends /start <payload>)
     # exactly ONCE — no second send here, that caused the double-link bug.
-    base_f = await _last_id(client, FUBUKI_BOT)
-    await _follow_button(bm, BTN_OPEN_LINK, client)
+    base_f = await _last_id(client, link_bot)
+    _, _, open_bot = await _follow_button(bm, BTN_OPEN_LINK, client)
+    # some setups route Open link to a DIFFERENT bot than the Download one —
+    # follow whichever the button actually points at
+    if open_bot and open_bot != link_bot:
+        log.info("post %s: Open link routes to @%s (not @%s) — switching",
+                 msg.id, open_bot, link_bot)
+        link_bot = open_bot
+        base_f = await _last_id(client, link_bot)
 
     await asyncio.sleep(STEP_DELAY)
 
-    # 6) Fubuki replies 'Here is your link https://t.me/Rias...?start=...'
-    state.stage = "waiting Fubuki final link"
-    fm2 = await _wait_new(client, FUBUKI_BOT, base_f, WAIT_BOT_REPLY, need_text="t.me/")
+    # 6) LINK_BOT replies 'Here is your link https://t.me/<MEDIA_BOT>?start=...'
+    state.stage = f"waiting @{link_bot} final link"
+    fm2 = await _wait_new(client, link_bot, base_f, WAIT_BOT_REPLY, need_text="t.me/")
     bot, payload = parse_tg_start(fm2.text)
     if not bot:
-        raise RuntimeError("no t.me start link in Fubuki final message")
+        # last resort: env-var MEDIA_BOT (kept for backward compat)
+        bot = MEDIA_BOT
+        payload = None
+        if not bot:
+            raise RuntimeError(f"no t.me start link in @{link_bot} final message "
+                               "and no MEDIA_BOT fallback set")
+    log.info("post %s: MEDIA_BOT=@%s (from @%s final link)", msg.id, bot, link_bot)
 
     await asyncio.sleep(STEP_DELAY)
 
