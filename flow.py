@@ -86,14 +86,17 @@ async def _follow_button(msg, needle, client=None):
     return res, b, None
 
 async def _collect_media(client, entity, after_id, max_wait=90, quiet=5):
-    """Collect videos + .srt documents arriving after after_id; stop after a
-    `quiet`-second gap (albums/multi-video) or max_wait.
+    """Collect EVERYTHING the media bot sends after after_id — videos, srt,
+    photos, stickers, AND text-only messages — stopping after a `quiet`-second
+    gap or max_wait. The only thing excluded is our own '/start' trigger.
     v17 fix: the media bot posts its decorative stickers/text INSTANTLY but
     takes many seconds to upload the actual video files (hundreds of MB).
     A bare quiet-timer fired in the gap between the sticker burst and the
     first video upload, and the DB channel silently got ONLY the stickers.
     The quiet timer now only counts once at least one VIDEO has arrived,
-    and a collection with ZERO videos raises instead of archiving junk."""
+    and a collection with ZERO videos raises instead of archiving junk.
+    v21: text messages collected too (owner wants a full mirror of the bot's
+    response, including its notes/warnings like the 12h-deletion notice)."""
     media, top, last_seen = [], after_id, time.time()
     saw_video = False
     deadline = time.time() + max_wait
@@ -103,9 +106,14 @@ async def _collect_media(client, entity, after_id, max_wait=90, quiet=5):
         msgs = await client.get_messages(entity, limit=20, min_id=after_id)
         for m in sorted([m for m in msgs if m and m.id > top], key=lambda x: x.id):
             top = max(top, m.id)
-            # collect EVERYTHING the media bot delivers — videos (any format),
-            # srt files, images, stickers, other documents
-            if m.media or m.photo or m.document or m.video or m.sticker:
+            # skip OUR OWN trigger message (/start <payload>) — everything
+            # else the chat gained is the bot's delivery and gets mirrored
+            if (not (m.media or m.photo or m.document or m.video or m.sticker)
+                    and norm(m.text or "").startswith("/start")):
+                continue
+            # collect EVERYTHING: media messages AND text-only messages
+            if (m.media or m.photo or m.document or m.video or m.sticker
+                    or (m.text or "").strip()):
                 media.append(m)
                 last_seen = time.time()
                 if is_video_msg(m):

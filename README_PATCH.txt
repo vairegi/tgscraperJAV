@@ -1,56 +1,53 @@
-TGSCRAPER v20 PATCH \u2014 4 changed files (overwrite, push, redeploy)
+TGSCRAPER v21 PATCH — 4 changed files (overwrite, push, redeploy)
 =================================================================
-  flow.py    \u2014 LINK_BOT + MEDIA_BOT discovered per POST (not from env).
-  config.py  \u2014 FUBUKI_BOT / MEDIA_BOT env vars now OPTIONAL (fallback only).
-  README.md  \u2014 documents per-target bot discovery.
-  README_PATCH.txt \u2014 this file.
+  forwarder.py — delivery VERIFICATION: silently-dead sends are detected,
+                 the empty message is removed, source refetched, send
+                 retried; every delivery logs its DB message id; text-only
+                 messages are now delivered too (full mirror).
+  flow.py      — _collect_media collects EVERYTHING the media bot sends
+                 (videos + srt + photos + stickers + text notes); only the
+                 userbot's own '/start' trigger message is excluded.
+  README.md    — documents verification + full mirroring.
+  README_PATCH.txt — this file.
 
-WHY (your report): target 1 (Hanime Alliance) and target 2 (I-ANIME Ecchi
-Network) use DIFFERENT LINK_BOTs. The old code hardcoded FUBUKI_BOT from
-env, so /resume 2 opened target 1's LINK_BOT for target 2's post \u2014 dead
-end. Now each Download button on each post is followed to WHICHEVER bot
-its own URL points at.
+THE BUG (from your screenshots + log): post 163's log said
+"collected 8 msg(s): 3 video + 5 other" then "post 163 done" with NO
+error — yet an hour later the DB channel had only the cover + decorations.
+That combination means Telegram SILENTLY ACCEPTED the video sends: when
+a file reference is dead server-side, send_file can return normally but
+the created message carries no media, so it never renders. Photos and
+stickers had live references (landed); the 3 video references were dead
+(invisible). Nothing failed, so nothing was retried — until now.
 
-HOW IT WORKS NOW (per post, per target):
-  1. Read the Download button's URL BEFORE clicking:
-     https://t.me/<LINK_BOT>?start=<payload>  \u2192 LINK_BOT for this post
-     (falls back to env FUBUKI_BOT only if the URL isn't a t.me deep link)
-  2. Click it \u2014 send /start <payload> to THAT LINK_BOT \u2014 wait its reply
-     on THAT chat.
-  3. Grab the short link, post to bypass group, click Open link.
-     If Open link points to a DIFFERENT bot (rare setups do this), the
-     code switches to that bot for step 6 too.
-  4. LINK_BOT's final reply contains https://t.me/<MEDIA_BOT>?start=...
-     \u2192 MEDIA_BOT for this post is whatever LINK_BOT names.
-  5. Videos forwarded to the DB channel exactly like before.
+FIX 1 — verified sends: after every send_file, the returned message is
+checked: no media = dead reference. The empty shell message is deleted
+from the DB channel, the source message is refetched from the media bot's
+chat (fresh file reference), and the send retried (3 attempts, 5s apart).
+If it still can't be delivered, the failure is raised and logged in Mongo
+(/progress) instead of being silently swallowed. Every delivered message
+logs "delivered msg N -> DB msg M" so you can verify by eye in Render logs.
 
-Every stage log now names the actual bot in use, e.g.:
-  post 165: LINK_BOT=@FubukiRobot (from Download button)
-  post 165: MEDIA_BOT=@Rias_Gremory_Robot (from @FubukiRobot final link)
-So the next time something breaks the log tells you WHICH bot involved.
+FIX 2 — full mirror (your request): the DB channel now receives EVERYTHING
+the media bot sends — videos, stickers, photos AND text-only messages
+(e.g. Hilda's "This File is deleting automatically in 12 hours" notice).
+The only thing excluded is the userbot's own '/start' trigger.
 
-ENV VARS (Render dashboard):
-  - FUBUKI_BOT / MEDIA_BOT are now OPTIONAL. You can DELETE them. They
-    only kick in as a fallback if a Download button is missing a t.me
-    deep-link URL (shouldn't happen with your bots).
-  - Everything else unchanged.
+STILL: zero downloads, zero temp files, no "Forwarded from" tag, all video
+attributes (duration, resolution, thumbnail, streaming, filename, spoiler)
+preserved via server-side reference copy.
 
-TESTS (sandbox, mocks \u2014 no network):
+TESTS (sandbox, mock Telethon — no network):
   - py_compile all 10 files: OK
-  - _peek_link_bot: extracts bot from t.me URL / from fancy-font button /
-    None when no t.me URL / None when no Download button: PASS
-  - _follow_button returns (url, button, bot_username) for tg deep links,
-    (url, button, None) for plain URLs, (result, button, None) for callback
-    buttons: PASS
-  - process_post integration (mock client + msg): two posts with different
-    LINK_BOTs (@BotA / @BotB) route to their OWN chats \u2014 no cross-target
-    contamination; MEDIA_BOT picked up from each LINK_BOT's own final reply
-    (@MedA / @MedB): PASS
-  - config.py: FUBUKI_BOT/MEDIA_BOT default to None (not crashing) when
-    env vars absent: PASS
-  - 14 PASS / 0 FAIL. NOT live-tested against Telegram (no session).
+  - 22 behavior tests: healthy send untouched; DEAD-REFERENCE send ->
+    empty shell deleted + refetch + retry with fresh media (the exact
+    bug scenario); refetch-empty raises for /progress; expired-reference
+    path intact; text-only delivered as text; mixed batch order kept;
+    collector mirrors text notes + excludes '/start' + keeps video gate.
+    22 PASS / 0 FAIL.
+  - NOT live-tested (no session in sandbox). First post after deploy,
+    watch for "delivered msg N -> DB msg M" lines — one per message.
 
-AFTER DEPLOY: /resume 2 (or bare /resume). Watch Render logs \u2014 you
-should see per-post "LINK_BOT=@..." / "MEDIA_BOT=@..." lines naming the
-right bots for each target. FUBUKI_BOT/MEDIA_BOT env vars can be removed
-from Render (or left as harmless fallback).
+AFTER DEPLOY: re-run the Hilda post:
+  /goto <that post's link>  then  /start
+The DB channel should get cover + decorations + text notice + all 3
+videos (480p/720p/1080p), each with its delivery logged.

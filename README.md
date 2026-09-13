@@ -58,10 +58,16 @@ Telegram file reference (send_file with msg.media), so Telegram copies the
 file server-to-server. Nothing is downloaded to disk or RAM (no temp files,
 stays flat on the 512MB free tier even for 700MB+ videos), and every file
 keeps its original format: playable video with thumbnail/duration/filename,
-spoiler flag, caption and buttons all preserved. Media collection waits for
-the actual VIDEO to arrive before its quiet-timer can end collection — the
-media bot posts stickers instantly but uploads videos slowly, and a post
-with ZERO videos is failed + retried, never archived as sticker-only.
+spoiler flag, caption and buttons all preserved. Every send is VERIFIED:
+Telegram can silently accept a send whose file reference is dead (message
+created with no media — nothing appears in the channel); the bot detects
+this, deletes the empty message, refetches the source for a fresh
+reference and retries. Everything the media bot sends is mirrored —
+videos, stickers, photos AND text notes (like its deletion warnings).
+Media collection waits for the actual VIDEO to arrive before its
+quiet-timer can end collection — the media bot posts stickers instantly
+but uploads videos slowly, and a post with ZERO videos is failed +
+retried, never archived as sticker-only.
 
 IDs: use the numeric id (e.g. `-1001234567890`) or @username.
 The account must be a member of the target channel, bypass group (with
