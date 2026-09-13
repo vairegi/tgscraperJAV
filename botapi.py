@@ -23,7 +23,7 @@ _CMDS = [
     ("deltarget","Remove a target channel"),
     ("setdb",    "Change a target's DB channel"),
     ("adddb",    "Set the fallback DB channel"),
-    ("bypass",   "Set bypass group"),
+    ("bypass",   "Set bypass endpoint (group OR bot @username)"),
     ("linkbutton", "List or add LINK_BOT button labels (no restart)"),
     ("removelinkbutton", "Remove a LINK_BOT button label by number"),
     ("goto",     "Set a target's start message (/goto <n> <msg> or link)"),
@@ -218,8 +218,14 @@ def register(scrape_client):
             await _save_simple(ev, field, _parse_chat_id(arg))
             return
         _pending[ev.sender_id] = (field, None)
-        label = "bypass group" if field == "bypass_id" else "fallback DB channel"
-        await ev.reply(f"Send me the {label} id (numeric like -100… or @username).\nCancel: /cancel")
+        if field == "bypass_id":
+            await ev.reply(
+                "Send me the bypass endpoint — either a GROUP id (like -100…) "
+                "or a BOT @username (e.g. @dex_fekkyeww_bot).\n"
+                "Bot endpoints reply in DM with the bypassed link in text — no "
+                "'Open link' button needed.\nCancel: /cancel")
+        else:
+            await ev.reply("Send me the fallback DB channel id (numeric like -100… or @username).\nCancel: /cancel")
 
     async def _save_simple(ev, field, v):
         try:
@@ -230,8 +236,23 @@ def register(scrape_client):
         if field == "db_id" and not _entity_ok(ent, "channel"):
             await ev.reply(_not_a_channel_msg(v, "channel"))
             return
-        if field == "bypass_id" and not _entity_ok(ent, "group"):
-            await ev.reply(_not_a_channel_msg(v, "group"))
+        if field == "bypass_id":
+            # bypass endpoint can be a GROUP (Channel/Chat) OR a BOT (User with bot=True)
+            is_group = _entity_ok(ent, "group")
+            is_bot = isinstance(ent, User) and getattr(ent, "bot", False)
+            if not (is_group or is_bot):
+                await ev.reply(
+                    f"⚠️ {v} isn't a group and isn't a bot — bypass must be one of those.\n"
+                    "For a bot, send its @username (e.g. @dex_fekkyeww_bot). "
+                    "For a group, paste any message link from the group "
+                    "(https://t.me/c/1234567890/12) or its -100… id.")
+                return
+            kind = "bot" if is_bot else "group"
+            await DB.set_config(field, v)
+            await ev.reply(f"✅ Saved bypass = {v} ({kind}). "
+                           + ("No 'Open link' button needed — the bypassed t.me link is read from the reply text."
+                              if is_bot else
+                              "The tagger's 'Open link' button reply is expected."))
             return
         await DB.set_config(field, v)
         await ev.reply(f"✅ Saved {field} = {v}")

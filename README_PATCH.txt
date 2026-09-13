@@ -1,53 +1,65 @@
-TGSCRAPER v21 PATCH — 4 changed files (overwrite, push, redeploy)
+TGSCRAPER v22 PATCH — 3 changed files (overwrite, push, redeploy)
 =================================================================
-  forwarder.py — delivery VERIFICATION: silently-dead sends are detected,
-                 the empty message is removed, source refetched, send
-                 retried; every delivery logs its DB message id; text-only
-                 messages are now delivered too (full mirror).
-  flow.py      — _collect_media collects EVERYTHING the media bot sends
-                 (videos + srt + photos + stickers + text notes); only the
-                 userbot's own '/start' trigger message is excluded.
-  README.md    — documents verification + full mirroring.
+  flow.py    — bypass step now works with either a GROUP (button reply,
+               unchanged) or a BOT (text-only reply, new).
+  botapi.py  — /bypass wizard accepts a bot @username; validates
+               group-vs-bot and confirms which kind was saved.
+  README.md  — updated /bypass row + brief docs.
   README_PATCH.txt — this file.
 
-THE BUG (from your screenshots + log): post 163's log said
-"collected 8 msg(s): 3 video + 5 other" then "post 163 done" with NO
-error — yet an hour later the DB channel had only the cover + decorations.
-That combination means Telegram SILENTLY ACCEPTED the video sends: when
-a file reference is dead server-side, send_file can return normally but
-the created message carries no media, so it never renders. Photos and
-stickers had live references (landed); the 3 video references were dead
-(invisible). Nothing failed, so nothing was retried — until now.
+WHY (your request): the bypass group is unusable, so bypass moves to
+@dex_fekkyeww_bot (or any similar bypass bot). That bot's reply has NO
+"Open link" button — it's a formatted DM like:
 
-FIX 1 — verified sends: after every send_file, the returned message is
-checked: no media = dead reference. The empty shell message is deleted
-from the DB channel, the source message is refetched from the media bot's
-chat (fresh file reference), and the send retried (3 attempts, 5s apart).
-If it still can't be delivered, the failure is raised and logged in Mongo
-(/progress) instead of being silently swallowed. Every delivered message
-logs "delivered msg N -> DB msg M" so you can verify by eye in Render logs.
+  ◈ 𝑶𝒓𝒊𝒈𝒊𝒏𝒂𝒍 𝑳𝒊𝒏𝒌
+  ➤ https://remso.xyz/EDtazEpz
+  ◈ 𝑩𝒚𝒑𝒂𝒔𝒔𝒆𝒅 𝑳𝒊𝒏𝒌
+  ➤ https://t.me/Fubuki_xRobot?start=<payload>
+  Developed by @nexunx
 
-FIX 2 — full mirror (your request): the DB channel now receives EVERYTHING
-the media bot sends — videos, stickers, photos AND text-only messages
-(e.g. Hilda's "This File is deleting automatically in 12 hours" notice).
-The only thing excluded is the userbot's own '/start' trigger.
+The bypassed link is what the userbot needs — it's the LAST t.me/... URL
+in the message (username credits like "@nexunx" are not t.me URLs, so
+they're ignored automatically).
 
-STILL: zero downloads, zero temp files, no "Forwarded from" tag, all video
-attributes (duration, resolution, thumbnail, streaming, filename, spoiler)
-preserved via server-side reference copy.
+HOW /bypass NOW BEHAVES:
+  /bypass @dex_fekkyeww_bot   → saved as BOT endpoint, reply reads:
+     "✅ Saved bypass = @dex_fekkyeww_bot (bot). No 'Open link' button
+      needed — the bypassed t.me link is read from the reply text."
+  /bypass -100…               → saved as GROUP endpoint (unchanged),
+     reply reads: "... The tagger's 'Open link' button reply is expected."
+  Anything that resolves to a user/non-bot or a channel-only entity is
+  rejected with a helpful message.
+
+HOW THE FLOW BRANCHES (per post, step 4):
+  - Resolves the bypass entity via client.get_entity() ONCE.
+  - If it's a BOT: sends the short link, waits (WAIT_BYPASS_REPLY, def
+    60s) for a reply containing "t.me/", harvests all t.me URLs from the
+    text with a regex, PREFERS a "?start=…" deep link (that's always the
+    bypassed one), falls back to any t.me URL. Then fires /start
+    <payload> at that link's target bot — exactly what clicking "Open
+    link" used to do.
+  - If it's a GROUP: unchanged — waits for the tagged 'Open link' button
+    reply, clicks it (still handles Open link routing to a different bot
+    if that ever happens).
+
+Everything downstream (step 6 LINK_BOT final reply → MEDIA_BOT videos →
+DB channel verified delivery) is IDENTICAL for both bypass kinds.
 
 TESTS (sandbox, mock Telethon — no network):
   - py_compile all 10 files: OK
-  - 22 behavior tests: healthy send untouched; DEAD-REFERENCE send ->
-    empty shell deleted + refetch + retry with fresh media (the exact
-    bug scenario); refetch-empty raises for /progress; expired-reference
-    path intact; text-only delivered as text; mixed batch order kept;
-    collector mirrors text notes + excludes '/start' + keeps video gate.
-    22 PASS / 0 FAIL.
-  - NOT live-tested (no session in sandbox). First post after deploy,
-    watch for "delivered msg N -> DB msg M" lines — one per message.
+  - URL harvest regex: parses your exact example message, picks the
+    Fubuki?start=… link (skips remso.xyz + @nexunx credit); schemeless
+    "t.me/…" also matches: PASS
+  - Integration bot-bypass: short link sent to bypass bot → BYPASSED
+    payload fired at LINK_BOT → MEDIA_BOT reached → video delivered to
+    DB channel: PASS
+  - Integration group-bypass (regression): unchanged behavior still
+    works — Open link button clicked with OPEN payload → LINK_BOT →
+    MEDIA_BOT: PASS
+  - 12 PASS / 0 FAIL. NOT live-tested (no session in sandbox).
 
-AFTER DEPLOY: re-run the Hilda post:
-  /goto <that post's link>  then  /start
-The DB channel should get cover + decorations + text notice + all 3
-videos (480p/720p/1080p), each with its delivery logged.
+AFTER DEPLOY:
+  1. /bypass @dex_fekkyeww_bot   (confirm the "bot" line in the reply)
+  2. /resume                     (or /start)
+  3. Watch Render logs for "post N: bypass bot returned deep link -> @<LINK_BOT>"
+     followed by the normal step 6 / 7 / delivery lines.

@@ -9,12 +9,17 @@ LINK_BOT's final reply names its own MEDIA_BOT. So targets that use
 different bots (Hanime Alliance vs I-ANIME etc.) all work with a single
 scraper session, and adding a new channel with a new bot pair needs
 ZERO config — just /target and go."""
-import asyncio, logging, time
+import asyncio, logging, re, time
+from telethon.tl.types import User
 from config import (BTN_DOWNLOAD, BTN_SHORT_LINK, BTN_OPEN_LINK, FUBUKI_BOT, MEDIA_BOT,
                     WAIT_BOT_REPLY, WAIT_BYPASS_REPLY, POLL_INTERVAL, STEP_DELAY)
 from scraper import find_button, parse_tg_start, first_url, norm, is_video_msg, is_srt_msg
 import db as DB
 import forwarder
+
+# any tg link (with or without scheme) — used to harvest URLs from a bot's
+# formatted reply that may embed several links (Original + Bypassed + credits)
+_TG_URL_RE = re.compile(r"(?:https?://)?t\.me/[A-Za-z0-9_]+(?:\?start=[A-Za-z0-9_\-]+)?")
 
 class Abort(Exception):
     pass
@@ -205,24 +210,68 @@ async def process_post(client, cfg, msg):
 
     await asyncio.sleep(STEP_DELAY)
 
-    # 4) send the link to the bypass group; wait for the tagged 'Open link' reply
-    state.stage = "waiting bypass group Open link"
-    sent = await client.send_message(bypass, short_link)
-    bm = await _wait_new(client, bypass, sent.id, WAIT_BYPASS_REPLY, need_button=BTN_OPEN_LINK)
+    # 4) send the link to the bypass endpoint. It can be either a GROUP
+    #    (someone tags with an 'Open link' button) or a BOT (replies in DM
+    #    with a formatted message carrying the bypassed t.me link in text).
+    #    We detect which by resolving the entity once.
+    try:
+        bypass_ent = await client.get_entity(bypass)
+    except Exception as e:
+        raise RuntimeError(f"can't resolve bypass endpoint {bypass}: {e}")
+    bypass_is_bot = isinstance(bypass_ent, User) and getattr(bypass_ent, "bot", False)
 
-    # 5) click 'Open link' -> deep link back into LINK_BOT (SAME bot as step 2)
-    state.stage = f"clicking Open link (back to @{link_bot})"
-    # _follow_button already follows tg deep links (sends /start <payload>)
-    # exactly ONCE — no second send here, that caused the double-link bug.
-    base_f = await _last_id(client, link_bot)
-    _, _, open_bot = await _follow_button(bm, BTN_OPEN_LINK, client)
-    # some setups route Open link to a DIFFERENT bot than the Download one —
-    # follow whichever the button actually points at
-    if open_bot and open_bot != link_bot:
-        log.info("post %s: Open link routes to @%s (not @%s) — switching",
-                 msg.id, open_bot, link_bot)
-        link_bot = open_bot
+    state.stage = f"waiting bypass {'bot' if bypass_is_bot else 'group'} reply"
+    sent = await client.send_message(bypass, short_link)
+
+    if bypass_is_bot:
+        # 4b) BOT bypass path (e.g. @dex_fekkyeww_bot):
+        # its reply has NO 'Open link' button — it's a formatted message like
+        #   ◈ Original Link
+        #     ➤ https://remso.xyz/...
+        #   ◈ Bypassed Link
+        #     ➤ https://t.me/<LINK_BOT>?start=<payload>
+        # Wait for a message containing ANY t.me link, then pick the bypassed
+        # one (the LAST t.me URL wins — credits like "@nexunx" are usernames,
+        # not t.me links; the real bypassed link is the only start-link).
+        bm = await _wait_new(client, bypass, sent.id, WAIT_BYPASS_REPLY,
+                             need_text="t.me/")
+        # prefer a t.me/?start=... URL (that's the actual bypassed deep link);
+        # fall back to any t.me/... URL if no start-link was found
+        text = bm.text or bm.message or ""
+        urls = _TG_URL_RE.findall(text)
+        start_urls = [u for u in urls if "?start=" in u]
+        bypassed_url = (start_urls or urls)[-1] if urls else None
+        if not bypassed_url:
+            raise RuntimeError(f"bypass bot @{getattr(bypass_ent, 'username', bypass)} "
+                               "replied with no t.me link in its message text")
+        new_bot, payload_in = parse_tg_start(bypassed_url)
+        if not new_bot:
+            raise RuntimeError(f"bypass bot reply URL {bypassed_url} isn't a "
+                               "t.me/<bot>?start=... deep link")
+        # step 5 equivalent: fire /start <payload> at the bot the bypassed
+        # link addresses (usually SAME as LINK_BOT from step 2, sometimes not)
+        log.info("post %s: bypass bot returned deep link -> @%s", msg.id, new_bot)
+        if new_bot != link_bot:
+            link_bot = new_bot
         base_f = await _last_id(client, link_bot)
+        state.stage = f"opening bypassed link at @{link_bot}"
+        await client.send_message(link_bot,
+                                   f"/start {payload_in}" if payload_in else "/start")
+    else:
+        # 4a) GROUP bypass path (original behavior): wait for someone/some bot
+        # to reply with the 'Open link' button, then click it.
+        bm = await _wait_new(client, bypass, sent.id, WAIT_BYPASS_REPLY,
+                             need_button=BTN_OPEN_LINK)
+        state.stage = f"clicking Open link (back to @{link_bot})"
+        base_f = await _last_id(client, link_bot)
+        _, _, open_bot = await _follow_button(bm, BTN_OPEN_LINK, client)
+        # some setups route Open link to a DIFFERENT bot than the Download one —
+        # follow whichever the button actually points at
+        if open_bot and open_bot != link_bot:
+            log.info("post %s: Open link routes to @%s (not @%s) — switching",
+                     msg.id, open_bot, link_bot)
+            link_bot = open_bot
+            base_f = await _last_id(client, link_bot)
 
     await asyncio.sleep(STEP_DELAY)
 
