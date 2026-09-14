@@ -688,6 +688,7 @@ async def _bulk_edit(scrape_client, ev, channel, old, new):
     title = getattr(ent, "title", str(channel))
     status = await ev.reply(f"🔍 Scanning **{title}** for messages containing: {old}…")
     scanned = edited = failed = 0
+    last_err = None
     try:
         async for m in scrape_client.iter_messages(ent, search=old):
             scanned += 1
@@ -704,10 +705,21 @@ async def _bulk_edit(scrape_client, ev, channel, old, new):
             if new_txt == txt:
                 continue
             try:
-                await scrape_client.edit_message(ent, m, new_txt, parse_mode=None)
+                if not new_txt.strip():
+                    # nothing left after the edit: Telegram forbids EMPTY text
+                    # messages (MESSAGE_EMPTY). Media posts keep the file with
+                    # an empty caption (legal); TEXT-ONLY posts are DELETED
+                    # instead — the only sensible outcome for /deletetext.
+                    if getattr(m, "media", None) is not None:
+                        await scrape_client.edit_message(ent, m, "", parse_mode=None)
+                    else:
+                        await scrape_client.delete_messages(ent, m)
+                else:
+                    await scrape_client.edit_message(ent, m, new_txt, parse_mode=None)
                 edited += 1
             except Exception as e:
                 failed += 1
+                last_err = e
             if edited and edited % 25 == 0:
                 try:
                     await status.edit(f"⏳ Scanned {scanned}, edited {edited}…")
@@ -717,8 +729,13 @@ async def _bulk_edit(scrape_client, ev, channel, old, new):
         await ev.reply(f"⚠️ Scan failed partway ({e}). Edited {edited} before the error.")
         return
     verb = "edited" if new else "cleaned"
+    fail_txt = ""
+    if failed:
+        fail_txt = f", {failed} failed"
+        if last_err is not None:
+            fail_txt += f" (last error: {last_err})"  # REAL reason, not a guess
     await ev.reply(f"✅ Done — scanned {scanned} matching message(s) in **{title}**, "
-                   f"{verb} {edited}" + (f", {failed} failed (no edit rights?)" if failed else ""))
+                   f"{verb} {edited}{fail_txt}")
 
 
 async def start(scrape_client):
