@@ -12,7 +12,7 @@ ZERO config — just /target and go."""
 import asyncio, logging, re, time
 from telethon.tl.types import User
 from config import (BTN_DOWNLOAD, BTN_SHORT_LINK, BTN_OPEN_LINK, FUBUKI_BOT, MEDIA_BOT,
-                    WAIT_BOT_REPLY, WAIT_BYPASS_REPLY, POLL_INTERVAL, STEP_DELAY)
+                    ADMIN_USER_ID, WAIT_BOT_REPLY, WAIT_BYPASS_REPLY, POLL_INTERVAL, STEP_DELAY)
 from scraper import find_button, parse_tg_start, first_url, norm, is_video_msg, is_srt_msg
 import db as DB
 import forwarder
@@ -89,6 +89,95 @@ async def _follow_button(msg, needle, client=None):
         return url, b, bot
     res = await msg.click(i=c, j=r)
     return res, b, None
+
+
+class BypassFailed(Exception):
+    """One bypass endpoint didn't come back with a usable link (timeout,
+    unresolvable, reply without a t.me deep link). process_post catches this
+    and falls through to the ALT bypass endpoint (/altbypass)."""
+    pass
+
+
+async def _bypass_once(client, endpoint, short_link, link_bot, msg):
+    """Send short_link to ONE bypass endpoint and follow the result.
+    - BOT endpoint (e.g. @dex_fekkyeww_bot): replies in DM with a formatted
+      message — the bypassed link is the t.me/?start=... URL in its text.
+    - GROUP endpoint: someone tags with an 'Open link' BUTTON — clicked.
+    Returns (link_bot, base_f) — link_bot may CHANGE if the bypassed link /
+    Open button addresses a different bot than the Download one.
+    Raises BypassFailed (never Abort — aborts always propagate)."""
+    try:
+        ent = await client.get_entity(endpoint)
+    except Exception as e:
+        raise BypassFailed(f"can't resolve {endpoint}: {e}")
+    is_bot = isinstance(ent, User) and getattr(ent, "bot", False)
+    state.stage = f"waiting bypass {'bot' if is_bot else 'group'} reply ({endpoint})"
+    sent = await client.send_message(endpoint, short_link)
+    try:
+        if is_bot:
+            bm = await _wait_new(client, endpoint, sent.id, WAIT_BYPASS_REPLY,
+                                 need_text="t.me/")
+        else:
+            bm = await _wait_new(client, endpoint, sent.id, WAIT_BYPASS_REPLY,
+                                 need_button=BTN_OPEN_LINK)
+    except Abort:
+        raise
+    except Exception as e:
+        raise BypassFailed(f"{endpoint}: {e}")
+
+    if is_bot:
+        # formatted reply, e.g. '◈ Bypassed Link ➤ https://t.me/<bot>?start=...'
+        # — harvest every t.me URL; prefer the ?start= deep link (that IS the
+        # bypassed one); '@credit' usernames are not t.me URLs so ignored.
+        text = bm.text or bm.message or ""
+        urls = _TG_URL_RE.findall(text)
+        start_urls = [u for u in urls if "?start=" in u]
+        bypassed_url = (start_urls or urls)[-1] if urls else None
+        if not bypassed_url:
+            raise BypassFailed(f"bypass bot {endpoint} replied with no t.me link")
+        new_bot, payload_in = parse_tg_start(bypassed_url)
+        if not new_bot:
+            raise BypassFailed(f"bypass bot reply URL {bypassed_url} isn't a t.me start link")
+        log.info("post %s: bypass bot %s returned deep link -> @%s",
+                 msg.id, endpoint, new_bot)
+        if new_bot != link_bot:
+            link_bot = new_bot
+        base_f = await _last_id(client, link_bot)
+        state.stage = f"opening bypassed link at @{link_bot}"
+        await client.send_message(link_bot,
+                                   f"/start {payload_in}" if payload_in else "/start")
+        return link_bot, base_f
+
+    # GROUP path — click the tagged 'Open link' button (original behavior)
+    state.stage = f"clicking Open link (back to @{link_bot})"
+    base_f = await _last_id(client, link_bot)
+    _, _, open_bot = await _follow_button(bm, BTN_OPEN_LINK, client)
+    if open_bot and open_bot != link_bot:
+        log.info("post %s: Open link routes to @%s (not @%s) — switching",
+                 msg.id, open_bot, link_bot)
+        link_bot = open_bot
+        base_f = await _last_id(client, link_bot)
+    return link_bot, base_f
+
+
+async def _alert_admin(client, target, msg, reason):
+    """DM the owner (ADMIN_USER_ID) when BOTH bypass endpoints failed —
+    includes a tappable post link so it can be checked in one tap."""
+    if not ADMIN_USER_ID:
+        return
+    try:
+        tid = str(target)
+        if tid.startswith("-100"):
+            link = f"https://t.me/c/{tid[4:]}/{msg.id}"
+        else:
+            link = f"https://t.me/{tid.lstrip('@')}/{msg.id}"
+        await client.send_message(ADMIN_USER_ID,
+            f"\U0001F6A8 BYPASS FAILED — post needs attention\n"
+            f"Target: {target}\nPost: {link}\nReason: {reason}")
+        log.info("admin alerted for post %s", msg.id)
+    except Exception as e:
+        log.warning("admin alert failed: %s", e)
+
 
 async def _collect_media(client, entity, after_id, max_wait=90, quiet=5):
     """Collect EVERYTHING the media bot sends after after_id — videos, srt,
@@ -210,68 +299,28 @@ async def process_post(client, cfg, msg):
 
     await asyncio.sleep(STEP_DELAY)
 
-    # 4) send the link to the bypass endpoint. It can be either a GROUP
-    #    (someone tags with an 'Open link' button) or a BOT (replies in DM
-    #    with a formatted message carrying the bypassed t.me link in text).
-    #    We detect which by resolving the entity once.
+    # 4) bypass CHAIN: try the PRIMARY endpoint (/bypass) first — bot or
+    #    group, both handle the 'Open link' button OR a text-carried link.
+    #    If it doesn't come back with a usable link, fall back to the ALT
+    #    endpoint (/altbypass). When STRING_SESSION2 is the active account,
+    #    IT is the session talking to the alt endpoint. If BOTH fail, the
+    #    admin is DM'd the post link and the post fails loudly (/progress).
+    alt_bypass = cfg.get("alt_bypass_id")
     try:
-        bypass_ent = await client.get_entity(bypass)
-    except Exception as e:
-        raise RuntimeError(f"can't resolve bypass endpoint {bypass}: {e}")
-    bypass_is_bot = isinstance(bypass_ent, User) and getattr(bypass_ent, "bot", False)
-
-    state.stage = f"waiting bypass {'bot' if bypass_is_bot else 'group'} reply"
-    sent = await client.send_message(bypass, short_link)
-
-    if bypass_is_bot:
-        # 4b) BOT bypass path (e.g. @dex_fekkyeww_bot):
-        # its reply has NO 'Open link' button — it's a formatted message like
-        #   ◈ Original Link
-        #     ➤ https://remso.xyz/...
-        #   ◈ Bypassed Link
-        #     ➤ https://t.me/<LINK_BOT>?start=<payload>
-        # Wait for a message containing ANY t.me link, then pick the bypassed
-        # one (the LAST t.me URL wins — credits like "@nexunx" are usernames,
-        # not t.me links; the real bypassed link is the only start-link).
-        bm = await _wait_new(client, bypass, sent.id, WAIT_BYPASS_REPLY,
-                             need_text="t.me/")
-        # prefer a t.me/?start=... URL (that's the actual bypassed deep link);
-        # fall back to any t.me/... URL if no start-link was found
-        text = bm.text or bm.message or ""
-        urls = _TG_URL_RE.findall(text)
-        start_urls = [u for u in urls if "?start=" in u]
-        bypassed_url = (start_urls or urls)[-1] if urls else None
-        if not bypassed_url:
-            raise RuntimeError(f"bypass bot @{getattr(bypass_ent, 'username', bypass)} "
-                               "replied with no t.me link in its message text")
-        new_bot, payload_in = parse_tg_start(bypassed_url)
-        if not new_bot:
-            raise RuntimeError(f"bypass bot reply URL {bypassed_url} isn't a "
-                               "t.me/<bot>?start=... deep link")
-        # step 5 equivalent: fire /start <payload> at the bot the bypassed
-        # link addresses (usually SAME as LINK_BOT from step 2, sometimes not)
-        log.info("post %s: bypass bot returned deep link -> @%s", msg.id, new_bot)
-        if new_bot != link_bot:
-            link_bot = new_bot
-        base_f = await _last_id(client, link_bot)
-        state.stage = f"opening bypassed link at @{link_bot}"
-        await client.send_message(link_bot,
-                                   f"/start {payload_in}" if payload_in else "/start")
-    else:
-        # 4a) GROUP bypass path (original behavior): wait for someone/some bot
-        # to reply with the 'Open link' button, then click it.
-        bm = await _wait_new(client, bypass, sent.id, WAIT_BYPASS_REPLY,
-                             need_button=BTN_OPEN_LINK)
-        state.stage = f"clicking Open link (back to @{link_bot})"
-        base_f = await _last_id(client, link_bot)
-        _, _, open_bot = await _follow_button(bm, BTN_OPEN_LINK, client)
-        # some setups route Open link to a DIFFERENT bot than the Download one —
-        # follow whichever the button actually points at
-        if open_bot and open_bot != link_bot:
-            log.info("post %s: Open link routes to @%s (not @%s) — switching",
-                     msg.id, open_bot, link_bot)
-            link_bot = open_bot
-            base_f = await _last_id(client, link_bot)
+        link_bot, base_f = await _bypass_once(client, bypass, short_link,
+                                              link_bot, msg)
+    except BypassFailed as e:
+        if not alt_bypass:
+            raise RuntimeError(f"primary bypass failed ({e}) — no /altbypass fallback set")
+        log.warning("post %s: primary bypass failed (%s) — trying alt bypass %s",
+                    msg.id, e, alt_bypass)
+        state.stage = f"trying alt bypass {alt_bypass}"
+        try:
+            link_bot, base_f = await _bypass_once(client, alt_bypass, short_link,
+                                                  link_bot, msg)
+        except BypassFailed as e2:
+            await _alert_admin(client, target, msg, f"primary: {e} | alt: {e2}")
+            raise RuntimeError("both bypass endpoints failed — admin alerted")
 
     await asyncio.sleep(STEP_DELAY)
 

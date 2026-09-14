@@ -27,6 +27,9 @@ saves it. Add all three one by one, then tap `/start`.
 |---|---|
 | `/target <id>` | set target channel |
 | `/bypass <id-or-@bot>` | set bypass endpoint — group id OR bot @username (e.g. `@dex_fekkyeww_bot`) |
+| `/altbypass <id-or-@bot>` | fallback bypass — tried only if `/bypass` returns no link; both failing DMs the admin the post link |
+
+`/targets` shows each target's DB channel as a tappable invite link (minted by the userbot, which is admin there, and cached).
 | `/linkbutton [text]` | list LINK_BOT button labels, or add one — matched immediately, **no restart** |
 
 Each target's LINK_BOT is discovered per-post from the Download button's own `t.me/<bot>?start=...` URL, and MEDIA_BOT is discovered from LINK_BOT's final reply — so different target channels can use completely different bot pairs with no config.

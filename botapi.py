@@ -6,6 +6,7 @@ command. Only ADMIN_USER_ID can use it."""
 from telethon import TelegramClient, events
 from telethon.sessions import MemorySession
 from telethon.tl.functions.bots import SetBotCommandsRequest
+from telethon.tl.functions.messages import ExportChatInviteRequest
 from telethon.tl.types import BotCommand, BotCommandScopeDefault
 from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_USER_ID, BTN_SHORT_LINK
 import re
@@ -24,6 +25,7 @@ _CMDS = [
     ("setdb",    "Change a target's DB channel"),
     ("adddb",    "Set the fallback DB channel"),
     ("bypass",   "Set bypass endpoint (group OR bot @username)"),
+    ("altbypass","Fallback bypass — used only if /bypass fails"),
     ("linkbutton", "List or add LINK_BOT button labels (no restart)"),
     ("removelinkbutton", "Remove a LINK_BOT button label by number"),
     ("goto",     "Set a target's start message (/goto <n> <msg> or link)"),
@@ -86,15 +88,38 @@ def _entity_ok(ent, need):
     return isinstance(ent, (Channel, Chat))
 
 
-async def _list_targets_text():
+async def _db_invite_link(client, db_id):
+    """Tappable invite link for a DB channel, minted via the userbot (it is
+    admin there) and cached in Mongo — no new link on every /targets call."""
+    if not db_id or client is None:
+        return None
+    key = f"db_link_{db_id}"
+    cached = await DB.get_config(key)
+    if cached:
+        return cached
+    try:
+        inv = await client(ExportChatInviteRequest(db_id))
+    except Exception:
+        return None  # no permission / private without invite rights -> plain id
+    link = getattr(inv, "link", None)
+    if link:
+        await DB.set_config(key, link)
+    return link
+
+
+async def _list_targets_text(client=None):
     targets = await DB.get_targets()
     if not targets:
         return None
     lines = ["🎯 Target channels:"]
     for i, t in enumerate(targets):
         prog = await DB.get_progress(t["id"])
-        db_txt = t["db_id"] if t["db_id"] else "(fallback /adddb)"
-        lines.append(f"  {i+1}. {t['id']} → DB {db_txt} — resume at msg {prog}")
+        if t["db_id"]:
+            link = await _db_invite_link(client, t["db_id"])
+            db_txt = f"[DB]({link})" if link else str(t["db_id"])
+        else:
+            db_txt = "(fallback /adddb)"
+        lines.append(f"  {i+1}. {t['id']} → {db_txt} — resume at msg {prog}")
     return "\n".join(lines)
 
 
@@ -207,13 +232,14 @@ def register(scrape_client):
         _pending[ev.sender_id] = ("target_id", None)
         await ev.reply("Send me the TARGET channel id (numeric like -100… or @username).\nCancel: /cancel")
 
-    @bot.on(events.NewMessage(pattern=r"^/(bypass|adddb)(?:\s+(.+))?$"))
+    @bot.on(events.NewMessage(pattern=r"^/(bypass|adddb|altbypass)(?:\s+(.+))?$"))
     async def simple_wizard(ev):
         if not _admin(ev.sender_id):
             return
         cmd = ev.pattern_match.group(1)
         arg = (ev.pattern_match.group(2) or "").strip()
-        field = {"bypass": "bypass_id", "adddb": "db_id"}[cmd]
+        field = {"bypass": "bypass_id", "adddb": "db_id",
+                 "altbypass": "alt_bypass_id"}[cmd]
         if arg:
             await _save_simple(ev, field, _parse_chat_id(arg))
             return
@@ -224,6 +250,13 @@ def register(scrape_client):
                 "or a BOT @username (e.g. @dex_fekkyeww_bot).\n"
                 "Bot endpoints reply in DM with the bypassed link in text — no "
                 "'Open link' button needed.\nCancel: /cancel")
+        elif field == "alt_bypass_id":
+            await ev.reply(
+                "Send me the ALT bypass endpoint (GROUP id or BOT @username).\n"
+                "Used ONLY when the primary /bypass doesn't return a link — "
+                "the second session (STRING_SESSION2) talks to it when it's the "
+                "active account. Both fail = you get a DM alert with the post link.\n"
+                "Cancel: /cancel")
         else:
             await ev.reply("Send me the fallback DB channel id (numeric like -100… or @username).\nCancel: /cancel")
 
@@ -236,8 +269,8 @@ def register(scrape_client):
         if field == "db_id" and not _entity_ok(ent, "channel"):
             await ev.reply(_not_a_channel_msg(v, "channel"))
             return
-        if field == "bypass_id":
-            # bypass endpoint can be a GROUP (Channel/Chat) OR a BOT (User with bot=True)
+        if field in ("bypass_id", "alt_bypass_id"):
+            # bypass endpoints can be a GROUP (Channel/Chat) OR a BOT (User with bot=True)
             is_group = _entity_ok(ent, "group")
             is_bot = isinstance(ent, User) and getattr(ent, "bot", False)
             if not (is_group or is_bot):
@@ -248,11 +281,14 @@ def register(scrape_client):
                     "(https://t.me/c/1234567890/12) or its -100… id.")
                 return
             kind = "bot" if is_bot else "group"
+            label = "bypass" if field == "bypass_id" else "ALT bypass"
             await DB.set_config(field, v)
-            await ev.reply(f"✅ Saved bypass = {v} ({kind}). "
+            await ev.reply(f"✅ Saved {label} = {v} ({kind}). "
                            + ("No 'Open link' button needed — the bypassed t.me link is read from the reply text."
                               if is_bot else
-                              "The tagger's 'Open link' button reply is expected."))
+                              "The tagger's 'Open link' button reply is expected.")
+                           + ("" if field == "bypass_id" else
+                              " Used automatically if the primary /bypass fails."))
             return
         await DB.set_config(field, v)
         await ev.reply(f"✅ Saved {field} = {v}")
@@ -270,7 +306,7 @@ def register(scrape_client):
             await _do_remove(ev, arg)
             return
         _pending[ev.sender_id] = ("deltarget", None)
-        listing = await _list_targets_text()
+        listing = await _list_targets_text(scrape_client)
         await ev.reply(f"{listing}\n\nSend the id (or list number) to REMOVE.\n"
                        "Progress is kept — re-adding later resumes where it left off.\nCancel: /cancel")
 
@@ -300,7 +336,7 @@ def register(scrape_client):
             await _do_setdb(ev, arg)
             return
         _pending[ev.sender_id] = ("setdb", None)
-        listing = await _list_targets_text()
+        listing = await _list_targets_text(scrape_client)
         await ev.reply(f"{listing}\n\nSend: <number> <db_id>  (e.g.  2 -100999888777)\nCancel: /cancel")
 
     async def _do_setdb(ev, arg):
@@ -369,7 +405,7 @@ def register(scrape_client):
     async def targets_cmd(ev):
         if not _admin(ev.sender_id):
             return
-        listing = await _list_targets_text()
+        listing = await _list_targets_text(scrape_client)
         if not listing:
             await ev.reply("No target channels. Add one with /target")
             return
@@ -447,7 +483,7 @@ def register(scrape_client):
                 return
             targets = await DB.get_targets()
             if not (1 <= int(n) <= len(targets)):
-                await ev.reply((await _list_targets_text() or "No targets set.") +
+                await ev.reply((await _list_targets_text(scrape_client) or "No targets set.") +
                                f"\n\n⚠️ Target number must be 1-{len(targets)} (see /targets).")
                 return
             t = targets[int(n) - 1]
@@ -479,7 +515,7 @@ def register(scrape_client):
             return
         targets = await DB.get_targets()
         if not (1 <= int(n) <= len(targets)):
-            await ev.reply((await _list_targets_text() or "No targets set.") +
+            await ev.reply((await _list_targets_text(scrape_client) or "No targets set.") +
                            f"\n\n⚠️ Target number must be 1-{len(targets)} (see /targets).")
             return
         t = targets[int(n) - 1]
@@ -494,7 +530,7 @@ def register(scrape_client):
     async def status_cmd(ev):
         if _admin(ev.sender_id):
             cfg = await DB.get_config()
-            listing = await _list_targets_text() or "  (none)"
+            listing = await _list_targets_text(scrape_client) or "  (none)"
             ind = sorted(str(i + 1) for i, t in enumerate(await DB.get_targets()) if t.get("paused"))
             await ev.reply(f"🤖 Running: {state.running} | Paused: {state.paused}"
                            + (f" | Individually paused targets: {', '.join(ind)}" if ind else "") + "\n"
@@ -560,7 +596,7 @@ def register(scrape_client):
             arg = parts[1]
             if arg.lstrip("-").isdigit():
                 if len(targets) > 1:
-                    listing = await _list_targets_text()
+                    listing = await _list_targets_text(scrape_client)
                     await ev.reply(f"{listing}\n\nMultiple targets — pick one:\n"
                                    f"/goto <number> <msg_id>  (e.g. /goto 2 120)\n"
                                    f"or use a message link: /goto https://t.me/c/<channel>/<msg>")

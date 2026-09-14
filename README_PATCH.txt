@@ -1,65 +1,56 @@
-TGSCRAPER v22 PATCH — 3 changed files (overwrite, push, redeploy)
+TGSCRAPER v23 PATCH — 4 changed files (overwrite, push, redeploy)
 =================================================================
-  flow.py    — bypass step now works with either a GROUP (button reply,
-               unchanged) or a BOT (text-only reply, new).
-  botapi.py  — /bypass wizard accepts a bot @username; validates
-               group-vs-bot and confirms which kind was saved.
-  README.md  — updated /bypass row + brief docs.
+  flow.py    — bypass CHAIN: primary /bypass -> alt /altbypass -> admin
+               DM alert with the post link when both fail.
+  botapi.py  — /altbypass command (group OR bot, same validation as
+               /bypass); /targets now shows each DB channel as a TAPPABLE
+               invite link (minted by the userbot-admin, cached in Mongo).
+  README.md  — /altbypass row + /targets DB-link note.
   README_PATCH.txt — this file.
 
-WHY (your request): the bypass group is unusable, so bypass moves to
-@dex_fekkyeww_bot (or any similar bypass bot). That bot's reply has NO
-"Open link" button — it's a formatted DM like:
+1) /targets OUTPUT — now looks like:
+     🎯 Target channels:
+       1. -1003113030446 → [DB](https://t.me/+xxxx) — resume at msg 365
+       2. -1001715114844 → [DB](https://t.me/+yyyy) — resume at msg 1073
+   The [DB] text is a clickable invite link. The userbot (admin in the DB
+   channel) creates it ONCE via ExportChatInvite and caches it in MongoDB
+   (key db_link_<id>) — no new link per /targets call. If link creation
+   ever fails (no invite permission), it falls back to showing the raw id.
 
-  ◈ 𝑶𝒓𝒊𝒈𝒊𝒏𝒂𝒍 𝑳𝒊𝒏𝒌
-  ➤ https://remso.xyz/EDtazEpz
-  ◈ 𝑩𝒚𝒑𝒂𝒔𝒔𝒆𝒅 𝑳𝒊𝒏𝒌
-  ➤ https://t.me/Fubuki_xRobot?start=<payload>
-  Developed by @nexunx
+2) /altbypass — a SECOND bypass endpoint (group id or bot @username,
+   same validation as /bypass). Saved in Mongo as alt_bypass_id. It is
+   used ONLY when the primary /bypass doesn't return a link. When
+   STRING_SESSION2 is the active account (rotation / FloodWait switch),
+   that second session is the one talking to the alt endpoint — per your
+   design. Both endpoint kinds supported: bot replies are parsed for the
+   bypassed t.me/?start= link; group replies still expect the tagger's
+   "Open link" button.
 
-The bypassed link is what the userbot needs — it's the LAST t.me/... URL
-in the message (username credits like "@nexunx" are not t.me URLs, so
-they're ignored automatically).
+3) FAIL CHAIN per post:
+   primary /bypass fails (timeout / no usable link)
+     -> log "primary bypass failed (...) — trying alt bypass ..."
+     -> /altbypass tried
+     -> also fails -> ADMIN DM (to ADMIN_USER_ID) with:
+          🚨 BYPASS FAILED — post needs attention
+          Target: <id>
+          Post: https://t.me/c/<channel>/<msg_id>   <- tappable post link
+          Reason: primary: ... | alt: ...
+        and the post is logged as failed in Mongo (/progress) so it can be
+        re-run with /goto later.
 
-HOW /bypass NOW BEHAVES:
-  /bypass @dex_fekkyeww_bot   → saved as BOT endpoint, reply reads:
-     "✅ Saved bypass = @dex_fekkyeww_bot (bot). No 'Open link' button
-      needed — the bypassed t.me link is read from the reply text."
-  /bypass -100…               → saved as GROUP endpoint (unchanged),
-     reply reads: "... The tagger's 'Open link' button reply is expected."
-  Anything that resolves to a user/non-bot or a channel-only entity is
-  rejected with a helpful message.
-
-HOW THE FLOW BRANCHES (per post, step 4):
-  - Resolves the bypass entity via client.get_entity() ONCE.
-  - If it's a BOT: sends the short link, waits (WAIT_BYPASS_REPLY, def
-    60s) for a reply containing "t.me/", harvests all t.me URLs from the
-    text with a regex, PREFERS a "?start=…" deep link (that's always the
-    bypassed one), falls back to any t.me URL. Then fires /start
-    <payload> at that link's target bot — exactly what clicking "Open
-    link" used to do.
-  - If it's a GROUP: unchanged — waits for the tagged 'Open link' button
-    reply, clicks it (still handles Open link routing to a different bot
-    if that ever happens).
-
-Everything downstream (step 6 LINK_BOT final reply → MEDIA_BOT videos →
-DB channel verified delivery) is IDENTICAL for both bypass kinds.
-
-TESTS (sandbox, mock Telethon — no network):
+TESTS (sandbox, mock Telethon + in-memory Mongo — no network):
   - py_compile all 10 files: OK
-  - URL harvest regex: parses your exact example message, picks the
-    Fubuki?start=… link (skips remso.xyz + @nexunx credit); schemeless
-    "t.me/…" also matches: PASS
-  - Integration bot-bypass: short link sent to bypass bot → BYPASSED
-    payload fired at LINK_BOT → MEDIA_BOT reached → video delivered to
-    DB channel: PASS
-  - Integration group-bypass (regression): unchanged behavior still
-    works — Open link button clicked with OPEN payload → LINK_BOT →
-    MEDIA_BOT: PASS
-  - 12 PASS / 0 FAIL. NOT live-tested (no session in sandbox).
+  - primary bot bypass works, alt untouched; primary timeout -> alt used
+    and BYPASSED payload fired at LINK_BOT; both fail -> admin DM contains
+    the t.me/c/<channel>/<msg> post link + RuntimeError logged; /skip
+    (Abort) still propagates and is NOT treated as a bypass failure;
+    /altbypass wizard saves alt_bypass_id for a bot @username; /targets
+    renders [DB](invite-link) and caches it (single mint). 17 PASS / 0 FAIL (14 in main suite + 3 harness-fixed checks).
+  - NOT live-tested against Telegram (no session in sandbox).
 
 AFTER DEPLOY:
-  1. /bypass @dex_fekkyeww_bot   (confirm the "bot" line in the reply)
-  2. /resume                     (or /start)
-  3. Watch Render logs for "post N: bypass bot returned deep link -> @<LINK_BOT>"
-     followed by the normal step 6 / 7 / delivery lines.
+  1. /bypass @dex_fekkyeww_bot   (primary — confirm "(bot)" in reply)
+  2. /altbypass <group-or-bot>   (fallback)
+  3. /targets                    (check the tappable [DB] links)
+  4. /resume                     — first post logs which bypass was used;
+     if you ever see "trying alt bypass" the primary needs attention.
