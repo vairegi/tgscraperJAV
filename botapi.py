@@ -10,6 +10,7 @@ from telethon.tl.functions.messages import ExportChatInviteRequest
 from telethon.tl.types import BotCommand, BotCommandScopeDefault
 from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_USER_ID, BTN_SHORT_LINK
 import re
+import shlex
 import db as DB
 from flow import state
 from telethon.tl.types import Channel, Chat, User
@@ -40,6 +41,8 @@ _CMDS = [
     ("skip",     "Skip current post"),
     ("stop",     "Stop the scraper"),
     ("cancel",   "Cancel an active wizard prompt"),
+    ("replace",  "Edit channel posts: /replace <ch> \"old\" \"new\" (userbot)"),
+    ("deletetext","Remove text from channel posts: /deletetext <ch> \"text\""),
 ]
 
 _pending = {}  # user_id -> (kind, extra)
@@ -167,6 +170,41 @@ def register(scrape_client):
         if _admin(ev.sender_id):
             await ev.reply(f"🏓 Pong — control bot + scraper alive.\n"
                            f"📍 Stage: {state.stage} | Running: {state.running} | Paused: {state.paused}")
+
+    # ---------- bulk channel text editing (userbot-powered) ----------
+    @bot.on(events.NewMessage(pattern=r"^/replace(?:\s+([\s\S]+))?$"))
+    async def replace_cmd(ev):
+        if not _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        try:
+            parts = shlex.split(arg)
+        except ValueError:
+            parts = []
+        if len(parts) != 3:
+            await ev.reply('Usage: /replace <channel id> "target text" "replacement text"\n'
+                           'Quotes are needed when texts contain spaces. The USERBOT edits '
+                           'the posts (it must have edit rights in that channel).')
+            return
+        channel, old, new = parts
+        await _bulk_edit(scrape_client, ev, _parse_chat_id(channel), old, new)
+
+    @bot.on(events.NewMessage(pattern=r"^/deletetext(?:\s+([\s\S]+))?$"))
+    async def deletetext_cmd(ev):
+        if not _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        try:
+            parts = shlex.split(arg)
+        except ValueError:
+            parts = []
+        if len(parts) != 2:
+            await ev.reply('Usage: /deletetext <channel id> "text to delete"\n'
+                           'Quotes are needed when the text contains spaces. '
+                           'The USERBOT edits the posts (must have edit rights).')
+            return
+        channel, old = parts
+        await _bulk_edit(scrape_client, ev, _parse_chat_id(channel), old, "")
 
     # ---------- LINK_BOT button labels (Mongo-backed, no restart) ----------
     @bot.on(events.NewMessage(pattern=r"^/linkbutton(?:\s+(.+))?$"))
@@ -635,6 +673,52 @@ def register(scrape_client):
         state.reset_gen += 1
         state._last_scan = None
         await ev.reply(f"📌 Target {tid} will resume from message {mid}. /start or /resume to go.")
+
+
+async def _bulk_edit(scrape_client, ev, channel, old, new):
+    """/replace + /deletetext core: scan a channel (server-side search) with
+    the USERBOT and edit every message whose text contains `old`, replacing
+    it with `new` ('' for /deletetext). Bots can't edit user posts — the
+    userbot must be a member with edit rights in the channel."""
+    try:
+        ent = await scrape_client.get_entity(channel)
+    except Exception as e:
+        await ev.reply(f"⚠️ Can't access that channel with the userbot account: {e}")
+        return
+    title = getattr(ent, "title", str(channel))
+    status = await ev.reply(f"🔍 Scanning **{title}** for messages containing: {old}…")
+    scanned = edited = failed = 0
+    try:
+        async for m in scrape_client.iter_messages(ent, search=old):
+            scanned += 1
+            txt = m.message or ""
+            if old not in txt:
+                continue
+            new_txt = txt.replace(old, new)
+            if new:
+                pass
+            else:
+                # /deletetext: tidy leftover double spaces / blank lines
+                new_txt = re.sub(r"[ \t]{2,}", " ", new_txt)
+                new_txt = re.sub(r"\n{3,}", "\n\n", new_txt).strip()
+            if new_txt == txt:
+                continue
+            try:
+                await scrape_client.edit_message(ent, m, new_txt, parse_mode=None)
+                edited += 1
+            except Exception as e:
+                failed += 1
+            if edited and edited % 25 == 0:
+                try:
+                    await status.edit(f"⏳ Scanned {scanned}, edited {edited}…")
+                except Exception:
+                    pass
+    except Exception as e:
+        await ev.reply(f"⚠️ Scan failed partway ({e}). Edited {edited} before the error.")
+        return
+    verb = "edited" if new else "cleaned"
+    await ev.reply(f"✅ Done — scanned {scanned} matching message(s) in **{title}**, "
+                   f"{verb} {edited}" + (f", {failed} failed (no edit rights?)" if failed else ""))
 
 
 async def start(scrape_client):

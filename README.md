@@ -43,6 +43,10 @@ Each target's LINK_BOT is discovered per-post from the Download button's own `t.
 | `/progress` | posts done, **last scraped post**, resume point, media sent, failures + reasons |
 | `/ping` | check the bot is alive (works in control bot AND userbot) |
 | `/skip` `/stop` | skip current post / stop |
+| `/replace <ch> "old" "new"` | userbot edits every post containing `old` in that channel, replacing all occurrences |
+| `/deletetext <ch> "text"` | userbot removes `text` from every matching post in that channel |
+
+`/help` and the tappable menu are generated from the same command list, so every command above appears in both. Telegram caches the "/" menu — if it looks stale after a redeploy, close/reopen the bot chat.
 
 ## Flood-wait protection (v3)
 If Telegram returns FloodWaitError at login or mid-scrape, the process now
