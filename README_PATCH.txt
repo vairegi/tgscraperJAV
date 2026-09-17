@@ -1,53 +1,45 @@
-TGSCRAPER v25 PATCH — 4 changed files (overwrite, push, redeploy)
-=================================================================
-  botapi.py  — /replace + /deletetext rebuilt as a PACED BACKGROUND worker.
-  config.py  — new env knobs: BULK_EDIT_DELAY, BULK_MAX_FLOOD,
-               BULK_PROGRESS_EVERY.
-  README.md  — documents the pacing behavior.
+TGSCRAPER v25.1 PATCH — 4 changed files (overwrite, push, redeploy)
+==================================================================
+  botapi.py    — bulk-edit worker: scraper AUTO-PAUSE during edits,
+                 jittered pacing (2.5s + 0–1.5s random), resume notice.
+  forwarder.py — MediaInvalidError (dead file reference rejected at send
+                 time) now gets refetch-and-retry like FileReferenceExpired.
+  README.md    — documents auto-pause + jitter.
   README_PATCH.txt — this file.
 
-WHY (your run): /replace found 43 matching messages and fired 43 edits
-back-to-back — Telegram answered with FloodWaitError ("A wait of 182
-seconds is required"), and 34 edits were lost to the flood. With 500+
-posts to fix, unpaced editing is unusable.
+WHY (your question): the pacing WAS working — your own 7:27 run proves it:
+"edited 9/9 in 0.4 min" = 24s for 9 edits = ~2.7s each. The 7:28 timestamp
+on the flood notice is the status message's ORIGINAL send time — Telegram
+keeps that on edits; the notice itself went out ~2 min later (33 edits ×
+~2.75s ≈ 91s + flood). The real flood cause was CONCURRENCY: the scraper
+was delivering post 358 on the SAME userbot account while the edit worker
+ran — Telegram's flood bucket is account-wide, so 1 edit/2.5s + scraper
+sends together tripped the limit.
 
-WHAT CHANGED:
-  1. SCAN FIRST, EDIT SLOW: all matching messages are collected up front
-     (server-side search), then a background worker edits ONE message
-     every BULK_EDIT_DELAY seconds — default 2.5s (you asked for 2–3s).
-     Telegram's edit rate limit is never hit.
-  2. FLOOD-PROOF: if Telegram still answers FloodWaitError, the worker
-     SLEEPS the exact wait + 5s and retries the SAME message — nothing is
-     skipped. Waits longer than BULK_MAX_FLOOD (default 900s) count as a
-     failure instead of parking forever.
-  3. LIVE UPDATES: you get "📋 Found N message(s)… ETA ~X min"
-     immediately, then a progress line every 10 edits, a notice for every
-     flood wait slept through, and a final summary:
-     "✅ Done — Title: edited 43/43 in 2.1 min, 1 flood wait(s) slept
-      through" (plus the real error if anything failed).
-  4. BACKGROUND: the worker runs as a task — the control bot answers other
-     commands while a long edit run is in progress.
-  5. /deletetext empty-message behavior unchanged (text-only posts with
-     nothing left are deleted; media posts get caption cleared).
-
-ENV KNOBS (Render dashboard, no redeploy):
-  BULK_EDIT_DELAY=2.5     seconds between edits (set 2 or 3 as you like)
-  BULK_MAX_FLOOD=900      max flood wait to sleep through
-  BULK_PROGRESS_EVERY=10  progress update cadence
+FIX:
+  1. While a /replace or /deletetext worker runs, the scraper auto-pauses
+     (queue message says so) and auto-resumes when it finishes, replying
+     "▶️ Scraper resumed — bulk edit finished." Nothing to manage manually.
+  2. Pacing is now jittered (BULK_EDIT_DELAY + random 0–1.5s) — no fixed
+     burst pattern for Telegram's heuristics.
+  3. Bonus fix for the error visible at the top of your screenshot:
+     "The provided media object is invalid (caused by SendMediaRequest)"
+     = a dead file reference REJECTED at send time (cousin of the silent
+     dead-reference case). forwarder.py now catches MediaInvalidError and
+     refetches + retries, same as expired references — post 358's cover
+     will self-heal on re-run.
 
 TESTS (sandbox, mock userbot — no network):
   - py_compile all 10 files: OK
-  - 5-message run: all edited, pacing applied, progress updates shown,
-    summary correct: PASS
-  - FloodWait mid-run: slept through (measured >=6s), SAME message
-    retried, flood notice + counted in summary: PASS
-  - Flood beyond cap: counted as failure, NO 30-min park: PASS
-  - /deletetext empty-delete path intact under pacing: PASS
-  - no matches: clean 'Nothing found', no worker spawned: PASS
-  - 17 PASS / 0 FAIL. NOT live-tested against Telegram (no session).
+  - scraper auto-pauses during run, auto-resumes after with notice;
+    no auto-pause when scraper already paused; jittered pacing verified;
+    MediaInvalidError -> refetch + retry delivers; forwarder regression
+    (healthy send untouched). 9 PASS / 0 FAIL.
+  - NOT live-tested against Telegram (no session in sandbox).
 
-AFTER DEPLOY: re-run
-  /replace -1004369767119 "@VixinCult" "@NSFW_Universe"
-Expected: "Found 43 message(s)… ETA ~1.8 min" -> progress lines ->
-"edited 43/43". The 34 messages lost last time will be fixed in this run
-(the scan re-finds them because they still contain @VixinCult).
+AFTER DEPLOY: re-run the 99-message command:
+  /replace -1004369767119 "𝟭𝟴+ 𝗡𝗲𝘁𝘄𝗼𝗿𝗸: @𝗖𝘂𝗹𝘁𝘂𝗿𝗲𝗱_𝗔𝗹𝗹𝗶𝗮𝗻𝗰𝗲" "𝟭𝟴+ 𝗡𝗲𝘁𝘄𝗼𝗿𝗸: @NSFW_Universe"
+Expect: Found N -> auto-pause note -> progress lines -> "edited N/N" ->
+"▶️ Scraper resumed". With the scraper paused, floods should be rare —
+and any that happen are slept through with nothing lost.
+Also re-run post 358 for the failed cover: /goto <post 358 link>, /start.

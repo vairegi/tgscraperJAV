@@ -46,7 +46,7 @@ Each target's LINK_BOT is discovered per-post from the Download button's own `t.
 | `/replace <ch> "old" "new"` | userbot edits every post containing `old` in that channel, replacing all occurrences |
 | `/deletetext <ch> "text"` | userbot removes `text` from every matching post in that channel |
 
-Bulk edits are **Telegram-safe paced**: after scanning, a background worker edits ONE message every `BULK_EDIT_DELAY` seconds (default 2.5s — tune via Render env), sleeps through FloodWait errors in place and retries the same message (up to `BULK_MAX_FLOOD`, default 900s), and posts live progress into the status message every 10 edits. The control bot stays responsive during long runs. 500-message run at default pacing ≈ 21 min.
+Bulk edits are **Telegram-safe paced**: after scanning, a background worker edits ONE message every `BULK_EDIT_DELAY` seconds (default 2.5s — tune via Render env), sleeps through FloodWait errors in place and retries the same message (up to `BULK_MAX_FLOOD`, default 900s), and posts live progress into the status message every 10 edits. The control bot stays responsive during long runs. 500-message run at default pacing ≈ 21 min. During a bulk edit the scraper auto-pauses (the flood bucket is account-wide — scraper sends share the same limit as edits) and auto-resumes when the run finishes; pacing is jittered (+0–1.5s random).
 
 `/help` and the tappable menu are generated from the same command list, so every command above appears in both. Telegram caches the "/" menu — if it looks stale after a redeploy, close/reopen the bot chat.
 

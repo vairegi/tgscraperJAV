@@ -24,7 +24,7 @@ preserved because the same server-side file reference is reused."""
 import asyncio
 import logging
 
-from telethon.errors import FileReferenceExpiredError
+from telethon.errors import FileReferenceExpiredError, MediaInvalidError
 
 log = logging.getLogger("forwarder")
 
@@ -97,7 +97,7 @@ async def _send_one(client, dbc, msg, source, caption=None, buttons=None):
             log.info("delivered msg %s -> DB msg %s",
                      getattr(msg, "id", "?"), getattr(r, "id", "?"))
             return
-        except (FileReferenceExpiredError, StaleRef) as e:
+        except (FileReferenceExpiredError, StaleRef, MediaInvalidError) as e:
             # stale/dead reference: refetch from the source chat -> fresh
             # file_reference -> retry with the fresh media
             log.info("msg %s reference unusable (%s) — refetching",

@@ -15,6 +15,7 @@ import asyncio
 import re
 import shlex
 import time
+import random
 import db as DB
 from flow import state
 from telethon.tl.types import Channel, Chat, User
@@ -716,9 +717,16 @@ async def _bulk_edit(scrape_client, ev, channel, old, new):
     await status.edit(
         f"📋 Found {len(matches)} message(s) in **{title}**.\n"
         f"Editing 1 every {BULK_EDIT_DELAY}s (Telegram-safe pacing) — ETA ~{eta_min:.1f} min.\n"
-        "Flood waits are slept through automatically. Progress updates follow.")
+        "Flood waits are slept through automatically. Progress updates follow.\n"
+        "\u23f8 Scraper auto-pauses while edits run (shared rate limit) and resumes after.")
 
     async def _worker():
+        # v25.1: pause the scraper during bulk edits — Telegram's flood bucket
+        # is ACCOUNT-WIDE; the scraper's sends share it (that caused the 219s
+        # flood on the 99-message run while post 358 was being delivered).
+        was_scraping = state.started and not state.paused
+        if was_scraping:
+            state.paused = True
         edited = failed = floods = 0
         last_err = None
         started = time.time()
@@ -763,7 +771,7 @@ async def _bulk_edit(scrape_client, ev, channel, old, new):
                     failed += 1
                     last_err = e
                     break
-            await asyncio.sleep(BULK_EDIT_DELAY)  # the pacing knob — never hammer edits
+            await asyncio.sleep(BULK_EDIT_DELAY + random.uniform(0, 1.5))  # pacing + jitter — human-like, never a fixed burst pattern
             if edited and edited % BULK_PROGRESS_EVERY == 0:
                 try:
                     await status.edit(f"⏳ Progress: {edited}/{len(matches)} edited"
@@ -781,6 +789,12 @@ async def _bulk_edit(scrape_client, ev, channel, old, new):
             await status.edit(summary)
         except Exception:
             pass
+        if was_scraping:
+            state.paused = False
+            try:
+                await ev.reply("▶️ Scraper resumed — bulk edit finished.")
+            except Exception:
+                pass
 
     return asyncio.ensure_future(_worker())
 
