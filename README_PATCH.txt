@@ -1,35 +1,53 @@
-TGSCRAPER v24.1 PATCH — 1 changed file (overwrite, push, redeploy)
+TGSCRAPER v25 PATCH — 4 changed files (overwrite, push, redeploy)
 =================================================================
-  botapi.py — /deletetext fix: empty-result handling + honest errors.
+  botapi.py  — /replace + /deletetext rebuilt as a PACED BACKGROUND worker.
+  config.py  — new env knobs: BULK_EDIT_DELAY, BULK_MAX_FLOOD,
+               BULK_PROGRESS_EVERY.
+  README.md  — documents the pacing behavior.
+  README_PATCH.txt — this file.
 
-SYMPTOM (your screenshot): /replace on channel -1004369767119 reported
-"edited 1" but /deletetext on the SAME message reported
-"cleaned 0, 1 failed (no edit rights?)" — despite the userbot clearly
-having edit rights (replace proved it).
+WHY (your run): /replace found 43 matching messages and fired 43 edits
+back-to-back — Telegram answered with FloodWaitError ("A wait of 182
+seconds is required"), and 34 edits were lost to the flood. With 500+
+posts to fix, unpaced editing is unusable.
 
-ROOT CAUSE: not permissions at all. Your target text 'Mmmmmm' is the
-ENTIRE content of that message, so deleting it leaves an EMPTY text
-message — which Telegram API rejects with MESSAGE_EMPTY. My code counted
-that rejection as a failure and guessed "(no edit rights?)" — a wrong
-label for the wrong reason.
+WHAT CHANGED:
+  1. SCAN FIRST, EDIT SLOW: all matching messages are collected up front
+     (server-side search), then a background worker edits ONE message
+     every BULK_EDIT_DELAY seconds — default 2.5s (you asked for 2–3s).
+     Telegram's edit rate limit is never hit.
+  2. FLOOD-PROOF: if Telegram still answers FloodWaitError, the worker
+     SLEEPS the exact wait + 5s and retries the SAME message — nothing is
+     skipped. Waits longer than BULK_MAX_FLOOD (default 900s) count as a
+     failure instead of parking forever.
+  3. LIVE UPDATES: you get "📋 Found N message(s)… ETA ~X min"
+     immediately, then a progress line every 10 edits, a notice for every
+     flood wait slept through, and a final summary:
+     "✅ Done — Title: edited 43/43 in 2.1 min, 1 flood wait(s) slept
+      through" (plus the real error if anything failed).
+  4. BACKGROUND: the worker runs as a task — the control bot answers other
+     commands while a long edit run is in progress.
+  5. /deletetext empty-message behavior unchanged (text-only posts with
+     nothing left are deleted; media posts get caption cleared).
 
-FIX:
-  - When an edit would leave NOTHING behind: media posts get their caption
-    cleared (legal), and TEXT-ONLY posts are DELETED entirely via the
-    userbot — the only sensible outcome for /deletetext there.
-  - The summary now reports the REAL error string (e.g.
-    "1 failed (last error: MESSAGE_ID_INVALID)") instead of guessing
-    permissions, so the next failure diagnoses itself.
+ENV KNOBS (Render dashboard, no redeploy):
+  BULK_EDIT_DELAY=2.5     seconds between edits (set 2 or 3 as you like)
+  BULK_MAX_FLOOD=900      max flood wait to sleep through
+  BULK_PROGRESS_EVERY=10  progress update cadence
 
-TESTS (sandbox, mocks — no network):
+TESTS (sandbox, mock userbot — no network):
   - py_compile all 10 files: OK
-  - full-match text-only message DELETED; media post caption cleared
-    (not deleted); partial match edited normally; summary "cleaned 3";
-    edit failure surfaces the real error and never says "no edit
-    rights?"; /replace regression intact. 9 PASS / 0 FAIL.
-  - NOT live-tested (no session in sandbox).
+  - 5-message run: all edited, pacing applied, progress updates shown,
+    summary correct: PASS
+  - FloodWait mid-run: slept through (measured >=6s), SAME message
+    retried, flood notice + counted in summary: PASS
+  - Flood beyond cap: counted as failure, NO 30-min park: PASS
+  - /deletetext empty-delete path intact under pacing: PASS
+  - no matches: clean 'Nothing found', no worker spawned: PASS
+  - 17 PASS / 0 FAIL. NOT live-tested against Telegram (no session).
 
-AFTER DEPLOY: re-run your command —
-  /deletetext -1004369767119 Mmmmmm
-The message should now be deleted and the summary should read
-"cleaned 1" (or show the actual Telegram error if something else blocks it).
+AFTER DEPLOY: re-run
+  /replace -1004369767119 "@VixinCult" "@NSFW_Universe"
+Expected: "Found 43 message(s)… ETA ~1.8 min" -> progress lines ->
+"edited 43/43". The 34 messages lost last time will be fixed in this run
+(the scan re-finds them because they still contain @VixinCult).

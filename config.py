@@ -48,6 +48,11 @@ POST_DELAY = float(os.environ.get("POST_DELAY", "45"))   # pause between posts
 FLOOD_MAX_WAIT = int(os.environ.get("FLOOD_MAX_WAIT", "1800"))  # 30 min
 FLOOD_PARK = int(os.environ.get("FLOOD_PARK", "1800"))          # park duration
 
+# Bulk editing (/replace, /deletetext) pacing — Telegram-safe by default
+BULK_EDIT_DELAY = float(os.environ.get("BULK_EDIT_DELAY", "2.5"))  # seconds between edits
+BULK_MAX_FLOOD = int(os.environ.get("BULK_MAX_FLOOD", "900"))      # sleep through FloodWait up to this (s)
+BULK_PROGRESS_EVERY = int(os.environ.get("BULK_PROGRESS_EVERY", "10"))  # status update cadence
+
 # Health-check server
 PORT = int(os.environ.get("PORT", "10000"))  # Render injects PORT
 

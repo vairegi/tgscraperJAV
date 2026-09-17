@@ -8,9 +8,13 @@ from telethon.sessions import MemorySession
 from telethon.tl.functions.bots import SetBotCommandsRequest
 from telethon.tl.functions.messages import ExportChatInviteRequest
 from telethon.tl.types import BotCommand, BotCommandScopeDefault
-from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_USER_ID, BTN_SHORT_LINK
+from config import (API_ID, API_HASH, BOT_TOKEN, ADMIN_USER_ID, BTN_SHORT_LINK,
+                    BULK_EDIT_DELAY, BULK_MAX_FLOOD, BULK_PROGRESS_EVERY)
+from telethon.errors import FloodWaitError
+import asyncio
 import re
 import shlex
+import time
 import db as DB
 from flow import state
 from telethon.tl.types import Channel, Chat, User
@@ -676,66 +680,109 @@ def register(scrape_client):
 
 
 async def _bulk_edit(scrape_client, ev, channel, old, new):
-    """/replace + /deletetext core: scan a channel (server-side search) with
-    the USERBOT and edit every message whose text contains `old`, replacing
-    it with `new` ('' for /deletetext). Bots can't edit user posts — the
-    userbot must be a member with edit rights in the channel."""
+    """/replace + /deletetext core — v25: TELEGRAM-SAFE PACING.
+    Phase 1: scan (server-side search) and COLLECT all matching messages.
+    Phase 2: a BACKGROUND worker edits ONE message every BULK_EDIT_DELAY
+    seconds (default 2.5s) so Telegram's edit rate limit is never hit.
+    FloodWaitError is slept through IN-PLACE and the SAME message retried
+    (waits beyond BULK_MAX_FLOOD count as failures instead of parking
+    forever). Live progress is edited into the status message every
+    BULK_PROGRESS_EVERY edits. Returns the worker task (handlers ignore it)
+    so the control bot stays responsive during long runs."""
     try:
         ent = await scrape_client.get_entity(channel)
     except Exception as e:
         await ev.reply(f"⚠️ Can't access that channel with the userbot account: {e}")
-        return
+        return None
     title = getattr(ent, "title", str(channel))
     status = await ev.reply(f"🔍 Scanning **{title}** for messages containing: {old}…")
-    scanned = edited = failed = 0
-    last_err = None
+    matches = []
     try:
         async for m in scrape_client.iter_messages(ent, search=old):
-            scanned += 1
             txt = m.message or ""
             if old not in txt:
                 continue
+            matches.append((m, txt))
+    except Exception as e:
+        try:
+            await status.edit(f"⚠️ Scan failed ({e}).")
+        except Exception:
+            pass
+        return None
+    if not matches:
+        await status.edit(f"✅ Nothing found in **{title}** containing: {old}")
+        return None
+    eta_min = len(matches) * BULK_EDIT_DELAY / 60
+    await status.edit(
+        f"📋 Found {len(matches)} message(s) in **{title}**.\n"
+        f"Editing 1 every {BULK_EDIT_DELAY}s (Telegram-safe pacing) — ETA ~{eta_min:.1f} min.\n"
+        "Flood waits are slept through automatically. Progress updates follow.")
+
+    async def _worker():
+        edited = failed = floods = 0
+        last_err = None
+        started = time.time()
+        for m, txt in matches:
             new_txt = txt.replace(old, new)
-            if new:
-                pass
-            else:
+            if not new:
                 # /deletetext: tidy leftover double spaces / blank lines
                 new_txt = re.sub(r"[ \t]{2,}", " ", new_txt)
                 new_txt = re.sub(r"\n{3,}", "\n\n", new_txt).strip()
             if new_txt == txt:
                 continue
-            try:
-                if not new_txt.strip():
-                    # nothing left after the edit: Telegram forbids EMPTY text
-                    # messages (MESSAGE_EMPTY). Media posts keep the file with
-                    # an empty caption (legal); TEXT-ONLY posts are DELETED
-                    # instead — the only sensible outcome for /deletetext.
-                    if getattr(m, "media", None) is not None:
-                        await scrape_client.edit_message(ent, m, "", parse_mode=None)
-                    else:
-                        await scrape_client.delete_messages(ent, m)
-                else:
-                    await scrape_client.edit_message(ent, m, new_txt, parse_mode=None)
-                edited += 1
-            except Exception as e:
-                failed += 1
-                last_err = e
-            if edited and edited % 25 == 0:
+            while True:
                 try:
-                    await status.edit(f"⏳ Scanned {scanned}, edited {edited}…")
+                    if not new_txt.strip():
+                        # nothing left after the edit: Telegram forbids EMPTY text
+                        # messages (MESSAGE_EMPTY). Media posts keep the file with
+                        # an empty caption (legal); TEXT-ONLY posts are DELETED.
+                        if getattr(m, "media", None) is not None:
+                            await scrape_client.edit_message(ent, m, "", parse_mode=None)
+                        else:
+                            await scrape_client.delete_messages(ent, m)
+                    else:
+                        await scrape_client.edit_message(ent, m, new_txt, parse_mode=None)
+                    edited += 1
+                    break
+                except FloodWaitError as fe:
+                    secs = getattr(fe, "seconds", 60) or 60
+                    if secs <= BULK_MAX_FLOOD:
+                        floods += 1
+                        try:
+                            await status.edit(
+                                f"⏳ Flood wait {secs}s from Telegram — sleeping it off "
+                                f"(edited {edited}/{len(matches)} so far)…")
+                        except Exception:
+                            pass
+                        await asyncio.sleep(secs + 5)
+                        continue  # retry the SAME message after the wait
+                    failed += 1
+                    last_err = fe
+                    break
+                except Exception as e:
+                    failed += 1
+                    last_err = e
+                    break
+            await asyncio.sleep(BULK_EDIT_DELAY)  # the pacing knob — never hammer edits
+            if edited and edited % BULK_PROGRESS_EVERY == 0:
+                try:
+                    await status.edit(f"⏳ Progress: {edited}/{len(matches)} edited"
+                                      + (f", {failed} failed" if failed else "")
+                                      + (f", {floods} flood wait(s) handled" if floods else ""))
                 except Exception:
                     pass
-    except Exception as e:
-        await ev.reply(f"⚠️ Scan failed partway ({e}). Edited {edited} before the error.")
-        return
-    verb = "edited" if new else "cleaned"
-    fail_txt = ""
-    if failed:
-        fail_txt = f", {failed} failed"
-        if last_err is not None:
-            fail_txt += f" (last error: {last_err})"  # REAL reason, not a guess
-    await ev.reply(f"✅ Done — scanned {scanned} matching message(s) in **{title}**, "
-                   f"{verb} {edited}{fail_txt}")
+        verb = "edited" if new else "cleaned"
+        mins = (time.time() - started) / 60
+        summary = (f"✅ Done — **{title}**: {verb} {edited}/{len(matches)} in {mins:.1f} min"
+                   + (f", {floods} flood wait(s) slept through" if floods else ""))
+        if failed:
+            summary += f", {failed} failed (last error: {last_err})"
+        try:
+            await status.edit(summary)
+        except Exception:
+            pass
+
+    return asyncio.ensure_future(_worker())
 
 
 async def start(scrape_client):
