@@ -53,6 +53,13 @@ BULK_EDIT_DELAY = float(os.environ.get("BULK_EDIT_DELAY", "2.5"))  # seconds bet
 BULK_MAX_FLOOD = int(os.environ.get("BULK_MAX_FLOOD", "900"))      # sleep through FloodWait up to this (s)
 BULK_PROGRESS_EVERY = int(os.environ.get("BULK_PROGRESS_EVERY", "10"))  # status update cadence
 
+# MTProto bulk jobs (/massdlt, /forward) pacing — Telegram-safe by default.
+# Deletes go out in CHUNKS (many ids in one delete call) with a rest between
+# chunks, so a 2000-message range is deleted piece-by-piece, never flooded.
+MASS_DELETE_CHUNK = int(os.environ.get("MASS_DELETE_CHUNK", "100"))   # ids per delete call
+MASS_DELETE_DELAY = float(os.environ.get("MASS_DELETE_DELAY", "3"))   # seconds between chunks
+FORWARD_DELAY = float(os.environ.get("FORWARD_DELAY", "3"))           # seconds between forwarded messages
+
 # Health-check server
 PORT = int(os.environ.get("PORT", "10000"))  # Render injects PORT
 

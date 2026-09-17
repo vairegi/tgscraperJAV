@@ -1,45 +1,71 @@
-TGSCRAPER v25.1 PATCH — 4 changed files (overwrite, push, redeploy)
-==================================================================
-  botapi.py    — bulk-edit worker: scraper AUTO-PAUSE during edits,
-                 jittered pacing (2.5s + 0–1.5s random), resume notice.
-  forwarder.py — MediaInvalidError (dead file reference rejected at send
-                 time) now gets refetch-and-retry like FileReferenceExpired.
-  README.md    — documents auto-pause + jitter.
-  README_PATCH.txt — this file.
+================================================================================
+README_PATCH — v26: MTProto bulk jobs (mass delete / forward / add-bot-admin)
+================================================================================
 
-WHY (your question): the pacing WAS working — your own 7:27 run proves it:
-"edited 9/9 in 0.4 min" = 24s for 9 edits = ~2.7s each. The 7:28 timestamp
-on the flood notice is the status message's ORIGINAL send time — Telegram
-keeps that on edits; the notice itself went out ~2 min later (33 edits ×
-~2.75s ≈ 91s + flood). The real flood cause was CONCURRENCY: the scraper
-was delivering post 358 on the SAME userbot account while the edit worker
-ran — Telegram's flood bucket is account-wide, so 1 edit/2.5s + scraper
-sends together tripped the limit.
+WHAT CHANGED (drag these files onto the repo root, replacing existing ones):
 
-FIX:
-  1. While a /replace or /deletetext worker runs, the scraper auto-pauses
-     (queue message says so) and auto-resumes when it finishes, replying
-     "▶️ Scraper resumed — bulk edit finished." Nothing to manage manually.
-  2. Pacing is now jittered (BULK_EDIT_DELAY + random 0–1.5s) — no fixed
-     burst pattern for Telegram's heuristics.
-  3. Bonus fix for the error visible at the top of your screenshot:
-     "The provided media object is invalid (caused by SendMediaRequest)"
-     = a dead file reference REJECTED at send time (cousin of the silent
-     dead-reference case). forwarder.py now catches MediaInvalidError and
-     refetches + retries, same as expired references — post 358's cover
-     will self-heal on re-run.
+  mtprotomgr.py   NEW FILE — the three bulk-job engines (background workers,
+                  pacing, flood handling, scraper auto-pause, Mongo cursor).
+  botapi.py       CHANGED — 8 new commands added to _CMDS (so the "/" menu
+                  AND /help both list them — they can never drift) + their
+                  handlers. Nothing existing was touched.
+  config.py       CHANGED — 3 new optional env vars (safe defaults, no
+                  Render change needed):
+                    MASS_DELETE_CHUNK = 100  (ids per delete call)
+                    MASS_DELETE_DELAY = 3    (seconds between chunks)
+                    FORWARD_DELAY     = 3    (seconds between copies)
+  README.md       CHANGED — documents the new commands.
 
-TESTS (sandbox, mock userbot — no network):
-  - py_compile all 10 files: OK
-  - scraper auto-pauses during run, auto-resumes after with notice;
-    no auto-pause when scraper already paused; jittered pacing verified;
-    MediaInvalidError -> refetch + retry delivers; forwarder regression
-    (healthy send untouched). 9 PASS / 0 FAIL.
-  - NOT live-tested against Telegram (no session in sandbox).
+NEW COMMANDS (all in the "/" menu and /help):
 
-AFTER DEPLOY: re-run the 99-message command:
-  /replace -1004369767119 "𝟭𝟴+ 𝗡𝗲𝘁𝘄𝗼𝗿𝗸: @𝗖𝘂𝗹𝘁𝘂𝗿𝗲𝗱_𝗔𝗹𝗹𝗶𝗮𝗻𝗰𝗲" "𝟭𝟴+ 𝗡𝗲𝘁𝘄𝗼𝗿𝗸: @NSFW_Universe"
-Expect: Found N -> auto-pause note -> progress lines -> "edited N/N" ->
-"▶️ Scraper resumed". With the scraper paused, floods should be rare —
-and any that happen are slept through with nothing lost.
-Also re-run post 358 for the failed cover: /goto <post 358 link>, /start.
+  /massdlt <chat_id> <start_link> <end_link>
+      Deletes EVERY message between the two message links (inclusive).
+      Telegram-safe: messages go out in chunks of 100 ids with ~3s rests
+      between chunks (+0-1.5s jitter), so a 2000-message range is deleted
+      piece-by-piece — never one giant burst. FloodWait is slept through
+      in place and the same chunk retried (cap BULK_MAX_FLOOD=900s).
+  /massdlt_status   live progress (deleted/total, floods slept)
+  /massdlt_stop     cooperative stop after the current chunk
+
+  /forward <target_channel> <source_channel> <start_link> <end_link>
+      Copies every message in the range into the target channel BY
+      REFERENCE (send_file with msg.media) — NO "Forwarded from" tag,
+      ZERO downloads (same proven mechanism as the DB delivery). Media,
+      text and buttons are preserved; one message every ~3s.
+  /forward_status   live progress
+  /forward_stop     stops — the cursor is saved in MongoDB after EVERY
+                    message, so nothing is lost
+  /forward_resume   continues a stopped/interrupted/crashed forward from
+                    the exact next message (survives Render restarts)
+
+  /add <channel_id> @bot1 [@bot2 @bot3 ...]
+      The USERBOT adds each bot to the channel as ADMIN with ALL rights
+      (post, edit, delete, ban, invite, pin, add-admins, manage-call).
+      Non-bot usernames are skipped with a note. The userbot must already
+      be an admin with add-admins permission in that channel.
+      Example: /add -1002392274488 @loverxnbot @loverxn1bot @loverxn2bot
+
+SAFETY (same design as v25/v25.1 bulk editing):
+  - While any bulk job runs, the SCRAPER auto-pauses (Telegram's flood
+    bucket is account-wide) and auto-resumes when the job finishes.
+  - FloodWait mid-run = slept through in place, same work retried — no
+    error ever escapes mid-run.
+  - A summary is DM'd to ADMIN_USER_ID when a run finishes.
+  - The control bot stays responsive during long runs (jobs are background
+    tasks).
+
+TESTING (sandbox, mocks — no live Telegram session available):
+  - py_compile: ALL 10 project files PASS.
+  - Behavior tests (SimpleNamespace + AsyncMock): 25 PASS, 0 FAIL —
+    link parsing, massdlt range delete (inclusive, chunked), massdlt stop
+    mid-run, forward range copy by reference, cursor cleared on completion,
+    forward_resume continues from saved cursor, forward_status reporting,
+    /add grants full ChatAdminRights and skips non-bots, all 8 commands
+    present in _CMDS ("/" menu + /help).
+  - NOT tested against live Telegram (no session in sandbox) — the first
+    real /massdlt on a big range is worth watching in Render logs.
+
+DEPLOY: drag this zip's contents onto the repo root in the GitHub web UI;
+Render auto-redeploys. If the "/" menu looks stale afterwards, close and
+reopen the control-bot chat (Telegram caches the menu).
+================================================================================

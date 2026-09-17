@@ -45,6 +45,26 @@ Each target's LINK_BOT is discovered per-post from the Download button's own `t.
 | `/skip` `/stop` | skip current post / stop |
 | `/replace <ch> "old" "new"` | userbot edits every post containing `old` in that channel, replacing all occurrences |
 | `/deletetext <ch> "text"` | userbot removes `text` from every matching post in that channel |
+| `/massdlt <chat> <start_link> <end_link>` | userbot deletes every message between the two message links (inclusive) — chunked + paced, flood-safe |
+| `/massdlt_status` `/massdlt_stop` | watch / stop the mass-delete |
+| `/forward <target> <source> <start_link> <end_link>` | userbot copies a message range into another channel — by reference, no "Forwarded from" tag, zero download |
+| `/forward_status` `/forward_stop` `/forward_resume` | watch / stop / resume a forward (cursor saved in MongoDB, survives crashes) |
+| `/add <channel> @bot1 [@bot2 …]` | userbot adds the bot(s) to the channel as ADMIN with all permissions |
+
+## MTProto bulk jobs (mass delete / forward / add-bot)
+All three run as paced background jobs, exactly like the bulk editor: one
+action every few seconds (`MASS_DELETE_DELAY` / `FORWARD_DELAY`, ~3s default,
+tunable via Render env), deletions go out in chunks of `MASS_DELETE_CHUNK`
+(default 100 ids per call) so even a 2000-message range is deleted
+piece-by-piece with rests — Telegram never sees a burst. FloodWait errors
+are slept through in place and the same work retried (up to
+`BULK_MAX_FLOOD`, default 900s). While any job runs, the scraper
+auto-pauses (Telegram's flood bucket is account-wide) and auto-resumes
+after; a summary is DM'd to the admin when a run finishes. `/forward`
+persists its cursor in MongoDB after every message, so `/forward_stop`, a
+crash, or a redeploy can be picked up with `/forward_resume`. `/add` needs
+the userbot to already be an admin with add-admins permission in that
+channel; it grants each listed bot full admin rights.
 
 Bulk edits are **Telegram-safe paced**: after scanning, a background worker edits ONE message every `BULK_EDIT_DELAY` seconds (default 2.5s — tune via Render env), sleeps through FloodWait errors in place and retries the same message (up to `BULK_MAX_FLOOD`, default 900s), and posts live progress into the status message every 10 edits. The control bot stays responsive during long runs. 500-message run at default pacing ≈ 21 min. During a bulk edit the scraper auto-pauses (the flood bucket is account-wide — scraper sends share the same limit as edits) and auto-resumes when the run finishes; pacing is jittered (+0–1.5s random).
 

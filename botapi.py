@@ -17,6 +17,7 @@ import shlex
 import time
 import random
 import db as DB
+import mtprotomgr as MTM
 from flow import state
 from telethon.tl.types import Channel, Chat, User
 
@@ -48,6 +49,14 @@ _CMDS = [
     ("cancel",   "Cancel an active wizard prompt"),
     ("replace",  "Edit channel posts: /replace <ch> \"old\" \"new\" (userbot)"),
     ("deletetext","Remove text from channel posts: /deletetext <ch> \"text\""),
+    ("massdlt",  "Delete a message range: /massdlt <chat> <start_link> <end_link>"),
+    ("massdlt_status", "Mass-delete progress"),
+    ("massdlt_stop", "Stop the mass-delete"),
+    ("forward",  "Copy range to a channel: /forward <target> <source> <start> <end>"),
+    ("forward_status", "Forward progress"),
+    ("forward_stop", "Stop the forward (resumable)"),
+    ("forward_resume", "Resume a stopped/interrupted forward"),
+    ("add",      "Add bot(s) as admin: /add <channel> @bot1 @bot2 …"),
 ]
 
 _pending = {}  # user_id -> (kind, extra)
@@ -210,6 +219,115 @@ def register(scrape_client):
             return
         channel, old = parts
         await _bulk_edit(scrape_client, ev, _parse_chat_id(channel), old, "")
+
+    # ---------- MTProto bulk jobs: mass delete / forward / add-bot-admin ----------
+    @bot.on(events.NewMessage(pattern=r"^/massdlt(?:\s+([\s\S]+))?$"))
+    async def massdlt_cmd(ev):
+        if not _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        try:
+            parts = shlex.split(arg)
+        except ValueError:
+            parts = []
+        if len(parts) != 3:
+            await ev.reply("Usage: /massdlt <chat_id> <start_link> <end_link>\n"
+                           "Deletes every message between the two links (inclusive). "
+                           "Chunked + paced (Telegram-safe) so a 2000-message range "
+                           "is deleted piece-by-piece, never flooded.")
+            return
+        chat, s, e = parts
+        await MTM.massdlt_start(scrape_client, ev, _parse_chat_id(chat), s, e)
+
+    @bot.on(events.NewMessage(pattern=r"^/massdlt_status$"))
+    async def massdlt_status_cmd(ev):
+        if not _admin(ev.sender_id):
+            return
+        txt = MTM.massdlt_job.progress_text()
+        await ev.reply(txt or "ℹ️ No mass-delete has run yet.")
+
+    @bot.on(events.NewMessage(pattern=r"^/massdlt_stop$"))
+    async def massdlt_stop_cmd(ev):
+        if not _admin(ev.sender_id):
+            return
+        if MTM.massdlt_job.status == "running":
+            MTM.massdlt_job.stop = True
+            MTM.massdlt_job.status = "stopping"
+            await ev.reply("🛑 Stopping mass-delete — it stops after the current chunk. "
+                           "/massdlt_status to confirm.")
+        else:
+            await ev.reply("ℹ️ No mass-delete is running.")
+
+    @bot.on(events.NewMessage(pattern=r"^/forward(?:\s+([\s\S]+))?$"))
+    async def forward_cmd(ev):
+        if not _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        try:
+            parts = shlex.split(arg)
+        except ValueError:
+            parts = []
+        if len(parts) != 4:
+            await ev.reply("Usage: /forward <target_channel> <source_channel> <start_link> <end_link>\n"
+                           "Copies every message in the range to the target channel — "
+                           "by reference, NO 'Forwarded from' tag, paced to avoid floods. "
+                           "Stops/crashes are resumable with /forward_resume.")
+            return
+        tgt, src, s, e = parts
+        await MTM.forward_start(scrape_client, ev, _parse_chat_id(tgt),
+                                _parse_chat_id(src), s, e)
+
+    @bot.on(events.NewMessage(pattern=r"^/forward_status$"))
+    async def forward_status_cmd(ev):
+        if not _admin(ev.sender_id):
+            return
+        txt = MTM.forward_job.progress_text()
+        if txt is None:
+            saved = await DB.get_config("fwd_job")
+            if saved and saved.get("ids") and saved.get("pos", 0) < len(saved["ids"]):
+                txt = (f"⏸ forward — stopped/interrupted\n"
+                       f"   {saved.get('source')} → {saved.get('target')}\n"
+                       f"   {saved.get('pos', 0)}/{len(saved['ids'])} done — "
+                       f"/forward_resume to continue.")
+            else:
+                txt = "ℹ️ No forward has run yet."
+        await ev.reply(txt)
+
+    @bot.on(events.NewMessage(pattern=r"^/forward_stop$"))
+    async def forward_stop_cmd(ev):
+        if not _admin(ev.sender_id):
+            return
+        if MTM.forward_job.status == "running":
+            MTM.forward_job.stop = True
+            MTM.forward_job.status = "stopping"
+            await ev.reply("🛑 Stopping forward — cursor saved in MongoDB; "
+                           "/forward_resume continues from the exact message.")
+        else:
+            await ev.reply("ℹ️ No forward is running.")
+
+    @bot.on(events.NewMessage(pattern=r"^/forward_resume$"))
+    async def forward_resume_cmd(ev):
+        if not _admin(ev.sender_id):
+            return
+        await MTM.forward_resume(scrape_client, ev)
+
+    @bot.on(events.NewMessage(pattern=r"^/add(?:\s+([\s\S]+))?$"))
+    async def add_cmd(ev):
+        if not _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        try:
+            parts = shlex.split(arg)
+        except ValueError:
+            parts = []
+        if len(parts) < 2:
+            await ev.reply("Usage: /add <channel id> @bot1 [@bot2 @bot3 …]\n"
+                           "Adds each bot to the channel as ADMIN with ALL permissions. "
+                           "The USERBOT does it — it must already be an admin there "
+                           "with add-admins permission.")
+            return
+        channel, bots = parts[0], parts[1:]
+        await MTM.add_bots(scrape_client, ev, _parse_chat_id(channel), bots)
 
     # ---------- LINK_BOT button labels (Mongo-backed, no restart) ----------
     @bot.on(events.NewMessage(pattern=r"^/linkbutton(?:\s+(.+))?$"))
