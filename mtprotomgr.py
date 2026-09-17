@@ -25,8 +25,10 @@ import re
 import time
 
 from telethon.errors import FloodWaitError
-from telethon.tl.functions.channels import EditAdminRequest
-from telethon.tl.types import Channel, ChatAdminRights
+from telethon.tl.functions.channels import EditAdminRequest, GetParticipantRequest
+from telethon.tl.types import (Channel, ChatAdminRights, ChannelParticipantAdmin,
+                               ChannelParticipantCreator)
+from telethon.errors import UserNotParticipantError
 
 import db as DB
 from config import (MASS_DELETE_CHUNK, MASS_DELETE_DELAY, FORWARD_DELAY,
@@ -448,11 +450,69 @@ async def _forward_worker(client, ev, src_ent, tgt_ent, msgs, status, done_base,
 # ADD BOT AS ADMIN — /add <channel_id> @bot1 [@bot2 ...]
 # --------------------------------------------------------------------------
 
+# Right keys — (attribute, human label, applies to megagroups too?).
+# manage_call & other are GROUP-only rights: setting them in a broadcast
+# channel triggers Telegram's "some rights only apply to channels and vice
+# versa" error, so they're only ever granted in megagroups.
+_RIGHT_KEYS = [
+    ("post_messages", "post", False),
+    ("edit_messages", "edit", False),
+    ("delete_messages", "delete", True),
+    ("ban_users", "ban", True),
+    ("invite_users", "invite", True),
+    ("pin_messages", "pin", True),
+    ("add_admins", "add_admins", True),
+    ("manage_call", "manage_call", True),   # group-only — filtered for channels
+    ("other", "other", True),               # group-only — filtered for channels
+]
+
+
+async def _invoker_rights(client, chan):
+    """The USERBOT's own admin rights in this channel. Telegram refuses to let
+    an admin grant a right it doesn't itself hold, so this is the ceiling.
+    Creator => all rights. Returns a dict attr->bool."""
+    try:
+        me = await client.get_me()
+        part = await client(GetParticipantRequest(chan, me.id))
+        pr = part.participant
+        if isinstance(pr, ChannelParticipantCreator):
+            return {k: True for k, _, _ in _RIGHT_KEYS}
+        if isinstance(pr, ChannelParticipantAdmin):
+            ar = pr.admin_rights
+            return {k: bool(getattr(ar, k, False)) for k, _, _ in _RIGHT_KEYS}
+        return {k: False for k, _, _ in _RIGHT_KEYS}
+    except UserNotParticipantError:
+        return {k: False for k, _, _ in _RIGHT_KEYS}
+    except Exception:
+        # unknown -> assume a reasonable admin ceiling, the retry fallback
+        # trims further if Telegram still objects
+        return {k: True for k, _, _ in _RIGHT_KEYS if k not in ("manage_call",)}
+
+
+def _make_rights(caps, megagroup):
+    """Build a ChatAdminRights from the capabilities the invoker can pass.
+    Group-only rights are dropped in broadcast channels."""
+    kw = {}
+    for attr, _label, group_ok in _RIGHT_KEYS:
+        if attr in ("manage_call", "other") and not megagroup:
+            kw[attr] = False
+        else:
+            kw[attr] = caps.get(attr, False)
+    kw["anonymous"] = False
+    return ChatAdminRights(**kw)
+
+
+def _caps_label(rights):
+    names = [lbl for attr, lbl, _ in _RIGHT_KEYS if getattr(rights, attr, False)]
+    return ", ".join(names) if names else "none"
+
+
 async def add_bots(scrape_client, ev, channel, botnames):
     if not botnames:
         await ev.reply("Usage: /add <channel id> @bot1 [@bot2 @bot3 …]\n"
-                       "Adds each bot to the channel as admin with full rights. "
-                       "The USERBOT does it (it must be admin with add-admins right).")
+                       "Adds each bot to the channel as admin with as many rights as "
+                       "the USERBOT can grant (it mirrors the userbot's own rights — "
+                       "Telegram won't let it pass rights it doesn't have).")
         return
     try:
         chan = await scrape_client.get_entity(channel)
@@ -463,14 +523,19 @@ async def add_bots(scrape_client, ev, channel, botnames):
         await ev.reply(f"⚠️ {channel} isn't a channel.")
         return
 
-    rights = ChatAdminRights(
-        post_messages=True, edit_messages=True, delete_messages=True,
-        ban_users=True, invite_users=True, pin_messages=True,
-        add_admins=True, anonymous=False, manage_call=True, other=True)
+    megagroup = bool(getattr(chan, "megagroup", False))
+    caps = await _invoker_rights(scrape_client, chan)
+    rights = _make_rights(caps, megagroup)
+    # channel-safe minimal fallback if the full set is still rejected
+    safe = _make_rights({k: caps.get(k, False) for k in
+                         ("post_messages", "edit_messages", "delete_messages",
+                          "invite_users")}, False)
 
     flood_job = _Job("add")   # local counter for flood waits
+    granted = _caps_label(rights)
     lines = [f"🤖 Adding {len(botnames)} bot(s) as admin in "
-             f"**{getattr(chan, 'title', channel)}**:"]
+             f"**{getattr(chan, 'title', channel)}** "
+             f"({'group' if megagroup else 'channel'}) — granting: {granted}"]
     for name in botnames:
         uname = name.strip().lstrip("@")
         if not uname:
@@ -480,15 +545,28 @@ async def add_bots(scrape_client, ev, channel, botnames):
             if not getattr(b, "bot", False):
                 lines.append(f"  ⚠️ @{uname} is not a bot — skipped.")
                 continue
-            while True:
-                try:
-                    await scrape_client(EditAdminRequest(chan, b, rights, rank=""))
-                    lines.append(f"  ✅ @{uname} — added as admin (all rights)")
-                    break
-                except FloodWaitError as fe:
-                    if await _sleep_flood(fe, flood_job):
-                        continue
-                    lines.append(f"  ❌ @{uname} — flood wait too long")
+            done = False
+            for attempt_rights, tag in ((rights, ""), (safe, " (reduced rights)")):
+                while True:
+                    try:
+                        await scrape_client(EditAdminRequest(chan, b, attempt_rights, rank=""))
+                        lines.append(f"  ✅ @{uname} — added as admin{tag} [{_caps_label(attempt_rights)}]")
+                        done = True
+                        break
+                    except FloodWaitError as fe:
+                        if await _sleep_flood(fe, flood_job):
+                            continue
+                        lines.append(f"  ❌ @{uname} — flood wait too long")
+                        done = True
+                        break
+                    except Exception as e:
+                        if attempt_rights is rights:
+                            log.warning("add @%s full rights rejected (%s) — retrying reduced", uname, e)
+                            break   # fall through to the reduced-rights attempt
+                        lines.append(f"  ❌ @{uname} — {e}")
+                        done = True
+                        break
+                if done:
                     break
         except Exception as e:
             lines.append(f"  ❌ @{uname} — {e}")

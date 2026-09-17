@@ -167,13 +167,39 @@ def register(scrape_client):
     async def help_cmd(ev):
         if not _admin(ev.sender_id):
             return
+        d = dict(_CMDS)
+        def L(name):
+            return f"/{name} — {d.get(name, '')}"
+        sections = [
+            ("ℹ️ INFO", ["help", "ping"]),
+            ("🎯 SETUP (targets · DB · bypass)",
+             ["target", "targets", "deltarget", "setdb", "adddb", "bypass", "altbypass"]),
+            ("🔘 LINK-BOT BUTTONS", ["linkbutton", "removelinkbutton"]),
+            ("▶️ SCRAPING", ["start", "pause", "resume", "stop", "skip", "cancel"]),
+            ("📊 MONITOR", ["status", "current", "progress", "lastpost"]),
+            ("🧭 PROGRESS CONTROL", ["goto", "reset"]),
+            ("✏️ BULK TEXT EDIT (userbot)", ["replace", "deletetext"]),
+            ("🧹 MASS DELETE (userbot)", ["massdlt", "massdlt_status", "massdlt_stop"]),
+            ("📨 FORWARD / COPY (userbot)",
+             ["forward", "forward_status", "forward_stop", "forward_resume"]),
+            ("🤖 ADD BOTS (userbot)", ["add"]),
+        ]
         lines = ["📖 COMMANDS"]
-        for c, d in _CMDS:
-            lines.append(f"/{c} — {d}")
+        shown = set()
+        for head, names in sections:
+            lines.append(f"\n{head}")
+            for n in names:
+                if n in d:
+                    lines.append(L(n))
+                    shown.add(n)
+        rest = [c for c, _ in _CMDS if c not in shown]
+        if rest:
+            lines.append("\nOTHER")
+            lines += [L(n) for n in rest]
         lines.append("\nTips: /target walks you through channel + its DB channel. "
                      "/goto accepts a message link (auto-picks the right target). "
                      "/pause 2 pauses ONLY target 2 (see /targets for numbers), "
-                     "/resume 2 resumes it — bare /pause //resume affects ALL targets. "
+                     "/resume 2 resumes it — bare /pause /resume affects ALL targets. "
                      "When LINK_BOT renames its button: /linkbutton <new text> — "
                      "active instantly, no restart. "
                      "Caught-up channels re-scan for new posts every 30s.")
