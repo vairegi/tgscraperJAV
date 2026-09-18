@@ -44,7 +44,7 @@ def _fmt_ts(ts):
     return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(ts))
 
 
-async def fmt_progress():
+async def fmt_progress(client=None):
     s = await DB.get_stats()
     targets = await DB.get_targets()
     tlines = []
@@ -52,8 +52,18 @@ async def fmt_progress():
         lp = await DB.get_last_post(t["id"])
         rp = await DB.get_progress(t["id"])
         flag = " ⏸PAUSED" if t.get("paused") else ""
-        tlines.append(f"  {i+1}. {t['id']} → DB {t.get('db_id') or '(fallback)'} "
-                      f"(resume {rp}, last scraped {lp}){flag}")
+        if client is not None:
+            # titled + linked: private targets link to their last scraped post
+            t_md = await botapi._chat_md(client, t["id"], msg_id=lp)
+            inv = (await botapi._db_invite_link(client, t["db_id"])
+                   if t.get("db_id") else None)
+            db_md = (await botapi._chat_md(client, t["db_id"], invite=inv)
+                     if t.get("db_id") else "(fallback)")
+            tlines.append(f"  {i+1}. {t_md} → DB {db_md} "
+                          f"(resume {rp}, last scraped {lp}){flag}")
+        else:
+            tlines.append(f"  {i+1}. {t['id']} → DB {t.get('db_id') or '(fallback)'} "
+                          f"(resume {rp}, last scraped {lp}){flag}")
     tid = targets[0]["id"] if targets else None
     last = await DB.get_progress(tid) if tid else 0
     last_post = await DB.get_last_post(tid) if tid else None

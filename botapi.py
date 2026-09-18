@@ -57,13 +57,19 @@ _CMDS = [
     ("forward_stop", "Stop the forward (resumable)"),
     ("forward_resume", "Resume a stopped/interrupted forward"),
     ("add",      "Add bot(s) as admin: /add <channel> @bot1 @bot2 …"),
+    ("addadmin", "Add a bot admin (bare /addadmin lists them)"),
+    ("removeadmin", "Remove a bot admin: /removeadmin <user id>"),
 ]
 
 _pending = {}  # user_id -> (kind, extra)
 
 
-def _admin(uid):
-    return ADMIN_USER_ID == 0 or uid == ADMIN_USER_ID
+async def _admin(uid):
+    """The owner (ADMIN_USER_ID) always passes; ids added via /addadmin
+    (Mongo-backed) also get full access."""
+    if ADMIN_USER_ID == 0 or uid == ADMIN_USER_ID:
+        return True
+    return uid in await DB.get_admins()
 
 
 async def _menu():
@@ -124,6 +130,49 @@ async def _db_invite_link(client, db_id):
     return link
 
 
+_TITLE_CACHE = {}  # chat_id -> title (titles rarely change)
+
+
+async def _chat_title(client, chat_id):
+    """Resolve a channel/group title via the userbot (it's a member there).
+    Cached in-memory so repeat /targets calls don't spam get_entity."""
+    if chat_id is None:
+        return None
+    if chat_id in _TITLE_CACHE:
+        return _TITLE_CACHE[chat_id]
+    title = None
+    if client is not None:
+        try:
+            ent = await client.get_entity(chat_id)
+            title = getattr(ent, "title", None) or getattr(ent, "first_name", None)
+        except Exception:
+            title = None
+    if title:
+        _TITLE_CACHE[chat_id] = title
+    return title
+
+
+def _c_link(chat_id, msg_id=None):
+    """t.me/c/<internal>/<msg> — opens a PRIVATE channel for any member, no
+    invite link needed. Needs a message id to be tappable, so callers pass
+    the last scraped post when they have one."""
+    if not msg_id:
+        return None
+    s = str(chat_id)
+    if s.startswith("-100"):
+        s = s[4:]
+    return f"https://t.me/c/{s}/{msg_id}"
+
+
+async def _chat_md(client, chat_id, msg_id=None, invite=None):
+    """'[title](link)' markdown for a chat. Link priority: given invite link,
+    then t.me/c/<id>/<msg_id>. Falls back to the plain title, then raw id."""
+    title = await _chat_title(client, chat_id)
+    label = (title or str(chat_id)).replace("[", "(").replace("]", ")").replace("\n", " ")
+    link = invite or _c_link(chat_id, msg_id)
+    return f"[{label}]({link})" if link else label
+
+
 async def _list_targets_text(client=None):
     targets = await DB.get_targets()
     if not targets:
@@ -131,12 +180,17 @@ async def _list_targets_text(client=None):
     lines = ["🎯 Target channels:"]
     for i, t in enumerate(targets):
         prog = await DB.get_progress(t["id"])
+        last = await DB.get_last_post(t["id"])
+        # private targets have no invite link — embed the LAST SCRAPED post
+        # link instead (works for any member of the channel)
+        t_md = await _chat_md(client, t["id"], msg_id=last)
         if t["db_id"]:
             link = await _db_invite_link(client, t["db_id"])
-            db_txt = f"[DB]({link})" if link else str(t["db_id"])
+            db_txt = await _chat_md(client, t["db_id"], invite=link)
         else:
             db_txt = "(fallback /adddb)"
-        lines.append(f"  {i+1}. {t['id']} → {db_txt} — resume at msg {prog}")
+        flag = " ⏸" if t.get("paused") else ""
+        lines.append(f"  {i+1}. {t_md} → {db_txt} — resume at msg {prog}{flag}")
     return "\n".join(lines)
 
 
@@ -165,13 +219,14 @@ def register(scrape_client):
     # ---------- info ----------
     @bot.on(events.NewMessage(pattern=r"^/help$"))
     async def help_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         d = dict(_CMDS)
         def L(name):
             return f"/{name} — {d.get(name, '')}"
         sections = [
             ("ℹ️ INFO", ["help", "ping"]),
+            ("👑 ADMINS", ["addadmin", "removeadmin"]),
             ("🎯 SETUP (targets · DB · bypass)",
              ["target", "targets", "deltarget", "setdb", "adddb", "bypass", "altbypass"]),
             ("🔘 LINK-BOT BUTTONS", ["linkbutton", "removelinkbutton"]),
@@ -207,14 +262,14 @@ def register(scrape_client):
 
     @bot.on(events.NewMessage(pattern=r"^/ping$"))
     async def ping_cmd(ev):
-        if _admin(ev.sender_id):
+        if await _admin(ev.sender_id):
             await ev.reply(f"🏓 Pong — control bot + scraper alive.\n"
                            f"📍 Stage: {state.stage} | Running: {state.running} | Paused: {state.paused}")
 
     # ---------- bulk channel text editing (userbot-powered) ----------
     @bot.on(events.NewMessage(pattern=r"^/replace(?:\s+([\s\S]+))?$"))
     async def replace_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         arg = (ev.pattern_match.group(1) or "").strip()
         try:
@@ -231,7 +286,7 @@ def register(scrape_client):
 
     @bot.on(events.NewMessage(pattern=r"^/deletetext(?:\s+([\s\S]+))?$"))
     async def deletetext_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         arg = (ev.pattern_match.group(1) or "").strip()
         try:
@@ -249,7 +304,7 @@ def register(scrape_client):
     # ---------- MTProto bulk jobs: mass delete / forward / add-bot-admin ----------
     @bot.on(events.NewMessage(pattern=r"^/massdlt(?:\s+([\s\S]+))?$"))
     async def massdlt_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         arg = (ev.pattern_match.group(1) or "").strip()
         try:
@@ -267,14 +322,14 @@ def register(scrape_client):
 
     @bot.on(events.NewMessage(pattern=r"^/massdlt_status$"))
     async def massdlt_status_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         txt = MTM.massdlt_job.progress_text()
         await ev.reply(txt or "ℹ️ No mass-delete has run yet.")
 
     @bot.on(events.NewMessage(pattern=r"^/massdlt_stop$"))
     async def massdlt_stop_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         if MTM.massdlt_job.status == "running":
             MTM.massdlt_job.stop = True
@@ -286,7 +341,7 @@ def register(scrape_client):
 
     @bot.on(events.NewMessage(pattern=r"^/forward(?:\s+([\s\S]+))?$"))
     async def forward_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         arg = (ev.pattern_match.group(1) or "").strip()
         try:
@@ -305,7 +360,7 @@ def register(scrape_client):
 
     @bot.on(events.NewMessage(pattern=r"^/forward_status$"))
     async def forward_status_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         txt = MTM.forward_job.progress_text()
         if txt is None:
@@ -321,7 +376,7 @@ def register(scrape_client):
 
     @bot.on(events.NewMessage(pattern=r"^/forward_stop$"))
     async def forward_stop_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         if MTM.forward_job.status == "running":
             MTM.forward_job.stop = True
@@ -333,13 +388,13 @@ def register(scrape_client):
 
     @bot.on(events.NewMessage(pattern=r"^/forward_resume$"))
     async def forward_resume_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         await MTM.forward_resume(scrape_client, ev)
 
     @bot.on(events.NewMessage(pattern=r"^/add(?:\s+([\s\S]+))?$"))
     async def add_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         arg = (ev.pattern_match.group(1) or "").strip()
         try:
@@ -355,10 +410,58 @@ def register(scrape_client):
         channel, bots = parts[0], parts[1:]
         await MTM.add_bots(scrape_client, ev, _parse_chat_id(channel), bots)
 
+    # ---------- extra admins (owner-only management, Mongo-backed) ----------
+    def _owner(ev):
+        return ADMIN_USER_ID == 0 or ev.sender_id == ADMIN_USER_ID
+
+    @bot.on(events.NewMessage(pattern=r"^/addadmin(?:\s+(\S+))?$"))
+    async def addadmin_cmd(ev):
+        if not _owner(ev):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        if not arg:
+            admins = await DB.get_admins()
+            lines = [f"👑 Owner: `{ADMIN_USER_ID}`", "🛡 Admins (full bot access):"]
+            lines += ([f"  {i+1}. `{a}`" for i, a in enumerate(admins)]
+                      if admins else ["  (none yet)"])
+            lines.append("\n/addadmin <user id> to add one — they can use EVERY "
+                         "command like the owner. Get an id from @userinfobot.")
+            await ev.reply("\n".join(lines))
+            return
+        try:
+            uid = int(arg)
+        except ValueError:
+            await ev.reply("⚠️ /addadmin needs the NUMERIC Telegram user id "
+                           "(e.g. /addadmin 123456789) — @userinfobot gives it.")
+            return
+        if ADMIN_USER_ID and uid == ADMIN_USER_ID:
+            await ev.reply("ℹ️ That's the owner already.")
+            return
+        admins = await DB.add_admin(uid)
+        await ev.reply(f"✅ `{uid}` is now an admin — full bot access granted. "
+                       f"({len(admins)} admin(s) total)")
+
+    @bot.on(events.NewMessage(pattern=r"^/removeadmin(?:\s+(\S+))?$"))
+    async def removeadmin_cmd(ev):
+        if not _owner(ev):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        if not arg:
+            await ev.reply("Usage: /removeadmin <user id> — bare /addadmin lists current admins.")
+            return
+        try:
+            uid = int(arg)
+        except ValueError:
+            await ev.reply("⚠️ numeric user id only.")
+            return
+        admins, removed = await DB.remove_admin(uid)
+        await ev.reply(f"🗑 `{uid}` removed — they can no longer use the bot."
+                       if removed else "ℹ️ That id isn't in the admin list.")
+
     # ---------- LINK_BOT button labels (Mongo-backed, no restart) ----------
     @bot.on(events.NewMessage(pattern=r"^/linkbutton(?:\s+(.+))?$"))
     async def linkbutton_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         arg = (ev.pattern_match.group(1) or "").strip()
         if arg:
@@ -390,7 +493,7 @@ def register(scrape_client):
 
     @bot.on(events.NewMessage(pattern=r"^/removelinkbutton(?:\s+(\d+))?$"))
     async def removelinkbutton_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         n = ev.pattern_match.group(1)
         if not n:
@@ -408,7 +511,7 @@ def register(scrape_client):
     # ---------- wizards (all accept inline args too) ----------
     @bot.on(events.NewMessage(pattern=r"^/target(?:\s+(.+))?$"))
     async def target_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         arg = (ev.pattern_match.group(1) or "").strip()
         if arg:
@@ -421,7 +524,7 @@ def register(scrape_client):
 
     @bot.on(events.NewMessage(pattern=r"^/(bypass|adddb|altbypass)(?:\s+(.+))?$"))
     async def simple_wizard(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         cmd = ev.pattern_match.group(1)
         arg = (ev.pattern_match.group(2) or "").strip()
@@ -482,7 +585,7 @@ def register(scrape_client):
 
     @bot.on(events.NewMessage(pattern=r"^/deltarget(?:\s+(.+))?$"))
     async def deltarget_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         targets = await DB.get_targets()
         if not targets:
@@ -512,7 +615,7 @@ def register(scrape_client):
 
     @bot.on(events.NewMessage(pattern=r"^/setdb(?:\s+(.+))?$"))
     async def setdb_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         targets = await DB.get_targets()
         if not targets:
@@ -553,7 +656,7 @@ def register(scrape_client):
     @bot.on(events.NewMessage())
     async def wizard_answer(ev):
         item = _pending.get(ev.sender_id)
-        if not item or not _admin(ev.sender_id) or ev.raw_text.startswith("/"):
+        if not item or not await _admin(ev.sender_id) or ev.raw_text.startswith("/"):
             return  # a new /command cancels the pending wizard instead of being eaten
         kind, extra = item
         if kind == "target_id":
@@ -590,7 +693,7 @@ def register(scrape_client):
     # ---------- view ----------
     @bot.on(events.NewMessage(pattern=r"^/targets$"))
     async def targets_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         listing = await _list_targets_text(scrape_client)
         if not listing:
@@ -601,7 +704,7 @@ def register(scrape_client):
 
     @bot.on(events.NewMessage(pattern=r"^/lastpost(?:\s+(\d+))?$"))
     async def lastpost(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         targets = await DB.get_targets()
         if not targets:
@@ -637,7 +740,7 @@ def register(scrape_client):
     # ---------- control ----------
     @bot.on(events.NewMessage(pattern=r"^/start$"))
     async def start_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         targets = await DB.get_targets()
         cfg = await DB.get_config()
@@ -657,7 +760,7 @@ def register(scrape_client):
 
     @bot.on(events.NewMessage(pattern=r"^/(pause|resume)(?:\s+(\d+))?$"))
     async def pause_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         action = ev.pattern_match.group(1)
         n = ev.pattern_match.group(2)
@@ -715,7 +818,7 @@ def register(scrape_client):
 
     @bot.on(events.NewMessage(pattern=r"^/(status|current)$"))
     async def status_cmd(ev):
-        if _admin(ev.sender_id):
+        if await _admin(ev.sender_id):
             cfg = await DB.get_config()
             listing = await _list_targets_text(scrape_client) or "  (none)"
             ind = sorted(str(i + 1) for i, t in enumerate(await DB.get_targets()) if t.get("paused"))
@@ -727,26 +830,26 @@ def register(scrape_client):
 
     @bot.on(events.NewMessage(pattern=r"^/progress$"))
     async def progress_cmd(ev):
-        if _admin(ev.sender_id):
+        if await _admin(ev.sender_id):
             from bot import fmt_progress
-            await ev.reply(await fmt_progress())
+            await ev.reply(await fmt_progress(scrape_client))
 
     @bot.on(events.NewMessage(pattern=r"^/skip$"))
     async def skip_cmd(ev):
-        if _admin(ev.sender_id):
+        if await _admin(ev.sender_id):
             state.abort = True
             await ev.reply("⏭ Skipping current post…")
 
     @bot.on(events.NewMessage(pattern=r"^/stop$"))
     async def stop_cmd(ev):
-        if _admin(ev.sender_id):
+        if await _admin(ev.sender_id):
             state.abort = True; state.running = False; state.started = False
             await ev.reply("🛑 Stopped. Progress saved — /resume or /start continues from the same post.")
 
     # ---------- per-target reset & goto ----------
     @bot.on(events.NewMessage(pattern=r"^/reset(?:\s+(\d+))?$"))
     async def reset_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         targets = await DB.get_targets()
         if not targets:
@@ -770,7 +873,7 @@ def register(scrape_client):
 
     @bot.on(events.NewMessage(pattern=r"^/goto\b"))
     async def goto_cmd(ev):
-        if not _admin(ev.sender_id):
+        if not await _admin(ev.sender_id):
             return
         targets = await DB.get_targets()
         if not targets:

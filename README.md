@@ -49,7 +49,9 @@ Each target's LINK_BOT is discovered per-post from the Download button's own `t.
 | `/massdlt_status` `/massdlt_stop` | watch / stop the mass-delete |
 | `/forward <target> <source> <start_link> <end_link>` | userbot copies a message range into another channel — by reference, no "Forwarded from" tag, zero download |
 | `/forward_status` `/forward_stop` `/forward_resume` | watch / stop / resume a forward (cursor saved in MongoDB, survives crashes) |
-| `/add <channel> @bot1 [@bot2 …]` | userbot adds the bot(s) to the channel as ADMIN with all permissions |
+| `/add <channel> @bot1 [@bot2 …]` | userbot adds the bot(s) to the channel as ADMIN with as many rights as the userbot itself has |
+| `/addadmin [user id]` | owner adds a bot admin (full control-bot access); bare = list owner + admins |
+| `/removeadmin <user id>` | owner removes a bot admin |
 
 ## MTProto bulk jobs (mass delete / forward / add-bot)
 All three run as paced background jobs, exactly like the bulk editor: one
@@ -64,7 +66,11 @@ after; a summary is DM'd to the admin when a run finishes. `/forward`
 persists its cursor in MongoDB after every message, so `/forward_stop`, a
 crash, or a redeploy can be picked up with `/forward_resume`. `/add` needs
 the userbot to already be an admin with add-admins permission in that
-channel; it grants each listed bot full admin rights.
+channel; it grants each bot as many admin rights as the userbot itself has there (group-only rights are skipped in channels).
+
+`/targets` and `/progress` show each channel's **title as a tappable link** instead of a bare id: private targets link to their last scraped post (`t.me/c/…` — works for any member, no invite link needed), DB channels use their cached invite link (falling back to the plain title).
+
+Extra admins: `/addadmin <user id>` (owner only) gives another Telegram user FULL control-bot access — every command, like the owner. Bare `/addadmin` lists owner + admins; `/removeadmin <user id>` revokes one. The list lives in MongoDB, so it survives restarts/redeploys.
 
 Bulk edits are **Telegram-safe paced**: after scanning, a background worker edits ONE message every `BULK_EDIT_DELAY` seconds (default 2.5s — tune via Render env), sleeps through FloodWait errors in place and retries the same message (up to `BULK_MAX_FLOOD`, default 900s), and posts live progress into the status message every 10 edits. The control bot stays responsive during long runs. 500-message run at default pacing ≈ 21 min. During a bulk edit the scraper auto-pauses (the flood bucket is account-wide — scraper sends share the same limit as edits) and auto-resumes when the run finishes; pacing is jittered (+0–1.5s random).
 

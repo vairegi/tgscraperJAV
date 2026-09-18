@@ -112,6 +112,31 @@ async def remove_link_button(n):
     await set_config("link_buttons", buttons)
     return buttons, removed
 
+# ---------------- extra control-bot admins (owner-managed) ----------------
+# The owner (ADMIN_USER_ID env) is always admin. Ids added here get FULL
+# control-bot access, exactly like the owner. Mongo-backed -> survives
+# Render restarts/redeploys.
+
+async def get_admins():
+    doc = await db().config.find_one({"_id": "config"}) or {}
+    return list(doc.get("admins") or [])
+
+async def add_admin(uid):
+    admins = await get_admins()
+    if uid not in admins:
+        admins.append(uid)
+        await set_config("admins", admins)
+    return admins
+
+async def remove_admin(uid):
+    """Returns (admins, removed?)."""
+    admins = await get_admins()
+    if uid in admins:
+        admins.remove(uid)
+        await set_config("admins", admins)
+        return admins, True
+    return admins, False
+
 # ---------------- progress (per target id) ----------------
 
 async def get_progress(target_id):
