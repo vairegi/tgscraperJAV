@@ -12,6 +12,7 @@ from config import (API_ID, API_HASH, BOT_TOKEN, ADMIN_USER_ID, BTN_SHORT_LINK,
                     BULK_EDIT_DELAY, BULK_MAX_FLOOD, BULK_PROGRESS_EVERY)
 from telethon.errors import FloodWaitError
 import asyncio
+import logging
 import re
 import shlex
 import time
@@ -47,7 +48,7 @@ _CMDS = [
     ("skip",     "Skip current post"),
     ("stop",     "Stop the scraper"),
     ("cancel",   "Cancel an active wizard prompt"),
-    ("replace",  "Edit channel posts: /replace <ch> \"old\" \"new\" (userbot)"),
+    ("replace",  "Edit posts: /replace <ch> \"old\" \"new\" (userbot) — 2 args = DB2 (bot)"),
     ("deletetext","Remove text from channel posts: /deletetext <ch> \"text\""),
     ("massdlt",  "Delete a message range: /massdlt <chat> <start_link> <end_link>"),
     ("massdlt_status", "Mass-delete progress"),
@@ -59,9 +60,13 @@ _CMDS = [
     ("add",      "Add bot(s) as admin: /add <channel> @bot1 @bot2 …"),
     ("addadmin", "Add a bot admin (bare /addadmin lists them)"),
     ("removeadmin", "Remove a bot admin: /removeadmin <user id>"),
+    ("setdb2",   "Set a target's DB2 clean-mirror channel: /setdb2 <n> <id|off>"),
+    ("avoidtext","DB2: strip a credit string: /avoidtext <n> \"text\" (bare = list)"),
+    ("removeavoid", "Remove an avoid string: /removeavoid <n> <#>"),
 ]
 
 _pending = {}  # user_id -> (kind, extra)
+log_mirror = logging.getLogger("db2mirror")
 
 
 async def _admin(uid):
@@ -189,12 +194,14 @@ async def _list_targets_text(client=None):
             db_txt = await _chat_md(client, t["db_id"], invite=link)
         else:
             db_txt = "(fallback /adddb)"
+        if t.get("db2_id"):
+            db_txt += " → DB2 " + await _chat_md(client, t["db2_id"])
         flag = " ⏸" if t.get("paused") else ""
         lines.append(f"  {i+1}. {t_md} → {db_txt} — resume at msg {prog}{flag}")
     return "\n".join(lines)
 
 
-async def _add_target_with_db(scrape_client, ev, tid, dbid):
+async def _add_target_with_db(scrape_client, ev, tid, dbid, db2=None):
     try:
         ent_t = await scrape_client.get_entity(tid)
     except Exception as e:
@@ -212,7 +219,20 @@ async def _add_target_with_db(scrape_client, ev, tid, dbid):
         await ev.reply(_not_a_channel_msg(dbid, "channel"))
         return
     await DB.add_target(tid, dbid)
-    await ev.reply(f"✅ Target saved:\n  {tid} → DB {dbid}\n\n/targets to view all, /start to scrape.")
+    if db2 is not None:
+        try:
+            ent2 = await scrape_client.get_entity(db2)
+            if not _entity_ok(ent2, "channel"):
+                await ev.reply(_not_a_channel_msg(db2, "channel"))
+                return
+        except Exception as e:
+            await ev.reply(f"⚠️ Can't access that DB2 channel: {e}")
+            return
+        await DB.set_target_db2(tid, db2)
+    await ev.reply(f"✅ Target saved:\n  {tid} → DB {dbid}"
+                   + (f" → DB2 {db2} (bot clean-mirror ON — make sure the BOT is admin in DB and DB2)"
+                      if db2 is not None else "")
+                   + "\n\n/targets to view all, /start to scrape.")
 
 
 def register(scrape_client):
@@ -229,6 +249,7 @@ def register(scrape_client):
             ("👑 ADMINS", ["addadmin", "removeadmin"]),
             ("🎯 SETUP (targets · DB · bypass)",
              ["target", "targets", "deltarget", "setdb", "adddb", "bypass", "altbypass"]),
+            ("🧼 DB2 CLEAN MIRROR (bot)", ["setdb2", "avoidtext", "removeavoid"]),
             ("🔘 LINK-BOT BUTTONS", ["linkbutton", "removelinkbutton"]),
             ("▶️ SCRAPING", ["start", "pause", "resume", "stop", "skip", "cancel"]),
             ("📊 MONITOR", ["status", "current", "progress", "lastpost"]),
@@ -276,10 +297,17 @@ def register(scrape_client):
             parts = shlex.split(arg)
         except ValueError:
             parts = []
+        if len(parts) == 2:
+            # DB2 form — the BOT edits its own clean-mirror posts (no userbot
+            # flood hassle): /replace "old" "new"
+            old, new = parts
+            await _db2_bulk_edit(ev, old, new)
+            return
         if len(parts) != 3:
             await ev.reply('Usage: /replace <channel id> "target text" "replacement text"\n'
-                           'Quotes are needed when texts contain spaces. The USERBOT edits '
-                           'the posts (it must have edit rights in that channel).')
+                           'The USERBOT edits that channel (needs edit rights).\n'
+                           'Or: /replace "old" "new" — the BOT edits every DB2 mirror channel.\n'
+                           'Quotes are needed when texts contain spaces.')
             return
         channel, old, new = parts
         await _bulk_edit(scrape_client, ev, _parse_chat_id(channel), old, new)
@@ -409,6 +437,225 @@ def register(scrape_client):
             return
         channel, bots = parts[0], parts[1:]
         await MTM.add_bots(scrape_client, ev, _parse_chat_id(channel), bots)
+
+    # ---------- DB2 clean mirror (BOT copies DB -> DB2, credits stripped) ----------
+    _URL_RE = re.compile(r"(?:https?://)?(?:t\.me|telegram\.me)/\S+|https?://\S+")
+    _MENTION_RE = re.compile(r"@[A-Za-z0-9_]+")
+
+    def _clean_caption(text, avoids):
+        """Strip custom avoid-strings, all URLs (t.me + http) and @mentions from
+        a caption, then tidy leftover whitespace. Sent as plain text, so any
+        embedded-link formatting in the original dies with the entities."""
+        t = text or ""
+        for a in avoids or []:
+            t = t.replace(a, "")
+        t = _URL_RE.sub("", t)
+        t = _MENTION_RE.sub("", t)
+        t = re.sub(r"[ \t]+\n", "\n", t)
+        t = re.sub(r"\n{3,}", "\n\n", t)
+        return t.strip()
+
+    _DB2_CACHE = {"ts": 0.0, "map": {}}
+
+    async def _db2_map():
+        """db_channel_id -> target dict, for every target with a DB2 set.
+        Cached 30s so normal chats cost no Mongo query."""
+        if time.time() - _DB2_CACHE["ts"] > 30:
+            m = {}
+            for t in await DB.get_targets():
+                if t.get("db2_id") and t.get("db_id"):
+                    m[t["db_id"]] = t
+            _DB2_CACHE["ts"] = time.time()
+            _DB2_CACHE["map"] = m
+        return _DB2_CACHE["map"]
+
+    async def _copy_to_db2(m, db2, avoids):
+        """Copy ONE DB message into DB2 as a fresh bot post (no forward tag),
+        caption cleaned. FloodWait is slept through in place."""
+        cap = _clean_caption(m.message or "", avoids)
+        spoiler = bool(getattr(getattr(m, "media", None), "spoiler", False))
+        for _ in range(3):
+            try:
+                if getattr(m, "media", None) is not None:
+                    await bot.send_file(db2, m.media, caption=cap,
+                                        buttons=m.buttons, spoiler=spoiler)
+                elif cap:
+                    await bot.send_message(db2, cap)
+                return True
+            except FloodWaitError as fe:
+                await asyncio.sleep(min(getattr(fe, "seconds", 60), BULK_MAX_FLOOD) + 5)
+            except Exception as e:
+                log_mirror.warning("DB2 copy failed: %s", e)
+                return False
+        return False
+
+    @bot.on(events.NewMessage())
+    async def db2_mirror(ev):
+        """Auto-mirror: userbot posts to DB -> bot re-posts to DB2 cleaned.
+        Requires the BOT to be admin in BOTH DB (to receive channel posts) and
+        DB2 (to post)."""
+        t = (await _db2_map()).get(ev.chat_id)
+        if not t:
+            return
+        await _copy_to_db2(ev.message, t["db2_id"], t.get("avoid") or [])
+
+    async def _db2_bulk_edit(ev, old, new):
+        """BOT edits every message containing `old` in every DB2 channel —
+        these are the bot's OWN posts, so editing is allowed. Paced + flood-safe."""
+        targets = [t for t in await DB.get_targets() if t.get("db2_id")]
+        if not targets:
+            await ev.reply("No DB2 channels set — add one with /setdb2 <n> <id>.")
+            return
+        status = await ev.reply(f"🔍 Scanning {len(targets)} DB2 channel(s) for \"{old}\"…")
+        edited = failed = floods = 0
+        for t in targets:
+            db2 = t["db2_id"]
+            matches = []
+            try:
+                async for m in bot.iter_messages(db2):
+                    if old in (m.message or ""):
+                        matches.append(m)
+            except Exception as e:
+                await ev.reply(f"⚠️ Can't read DB2 {db2} (is the bot an admin there?): {e}")
+                continue
+            if not matches:
+                continue
+            await ev.reply(f"DB2 {db2}: editing {len(matches)} message(s)…")
+            for m in matches:
+                new_txt = (m.message or "").replace(old, new).strip()
+                while True:
+                    try:
+                        await bot.edit_message(db2, m.id, text=new_txt, buttons=m.buttons)
+                        edited += 1
+                        break
+                    except FloodWaitError as fe:
+                        secs = getattr(fe, "seconds", 60)
+                        if secs <= BULK_MAX_FLOOD:
+                            floods += 1
+                            await asyncio.sleep(secs + 5)
+                            continue
+                        failed += 1
+                        break
+                    except Exception:
+                        failed += 1
+                        break
+                if edited and edited % BULK_PROGRESS_EVERY == 0:
+                    try:
+                        await status.edit(f"⏳ {edited} edited, {failed} failed…")
+                    except Exception:
+                        pass
+                await asyncio.sleep(BULK_EDIT_DELAY + random.uniform(0, 1.5))
+        await status.edit(f"✅ DB2 edit done — {edited} message(s) updated"
+                          + (f", {failed} failed" if failed else "")
+                          + (f", {floods} flood wait(s) slept" if floods else ""))
+
+    @bot.on(events.NewMessage(pattern=r"^/setdb2(?:\s+([\s\S]+))?$"))
+    async def setdb2_cmd(ev):
+        if not await _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        try:
+            parts = shlex.split(arg)
+        except ValueError:
+            parts = []
+        targets = await DB.get_targets()
+        if len(parts) != 2:
+            cur = [f"  {i+1}. {t['id']} → DB2 {t.get('db2_id') or '(off)'}"
+                   for i, t in enumerate(targets)]
+            await ev.reply("Usage: /setdb2 <target #> <db2 channel id | off>\n"
+                           "The BOT re-posts everything from that target's DB into DB2 "
+                           "with credits/links stripped. Bot must be admin in both.\n"
+                           + ("\n".join(cur) if cur else "No targets yet."))
+            return
+        n_raw, db2_raw = parts
+        t = None
+        if n_raw.isdigit() and 1 <= int(n_raw) <= len(targets):
+            t = targets[int(n_raw) - 1]
+        else:
+            for cand in targets:
+                if str(cand["id"]) == n_raw:
+                    t = cand
+                    break
+        if not t:
+            await ev.reply("⚠️ Unknown target — see /targets for numbers.")
+            return
+        if db2_raw.lower() in ("off", "none", "0", "-"):
+            await DB.set_target_db2(t["id"], None)
+            await ev.reply(f"🧼 DB2 mirror OFF for target {t['id']}.")
+            return
+        db2 = _parse_chat_id(db2_raw)
+        try:
+            ent = await scrape_client.get_entity(db2)
+        except Exception as e:
+            await ev.reply(f"⚠️ Can't access that DB2 channel: {e}")
+            return
+        if not _entity_ok(ent, "channel"):
+            await ev.reply(_not_a_channel_msg(db2, "channel"))
+            return
+        await DB.set_target_db2(t["id"], db2)
+        await ev.reply(f"✅ Target {t['id']} now mirrors DB → DB2 {db2} (credits stripped).\n"
+                       "Make sure the BOT is admin in the DB channel AND in DB2.\n"
+                       "Add credit strings to strip with /avoidtext.")
+
+    @bot.on(events.NewMessage(pattern=r"^/avoidtext(?:\s+([\s\S]+))?$"))
+    async def avoidtext_cmd(ev):
+        if not await _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        try:
+            parts = shlex.split(arg)
+        except ValueError:
+            parts = []
+        targets = await DB.get_targets()
+        if not parts:
+            lines = ["🧼 DB2 avoid-strings (stripped from mirrored captions, "
+                     "on top of auto-stripped @mentions and links):"]
+            for i, t in enumerate(targets):
+                av = t.get("avoid") or []
+                lines.append(f"  {i+1}. {t['id']}: " + (", ".join(f'\"{a}\"' for a in av) if av else "(none)"))
+            lines.append("\n/avoidtext <target #> \"text\" to add — /removeavoid <target #> <#> to remove.")
+            await ev.reply("\n".join(lines))
+            return
+        if len(parts) == 1:
+            if not (parts[0].isdigit() and 1 <= int(parts[0]) <= len(targets)):
+                await ev.reply("Usage: /avoidtext <target #> \"text to strip\" — quotes when it has spaces.")
+                return
+            t = targets[int(parts[0]) - 1]
+            av = t.get("avoid") or []
+            await ev.reply(f"🧼 Avoid-strings for target {int(parts[0])} ({t['id']}):\n"
+                           + ("\n".join(f"  {j+1}. \"{a}\"" for j, a in enumerate(av)) if av else "  (none)")
+                           + "\n\n/avoidtext " + parts[0] + " \"text\" to add, /removeavoid " + parts[0] + " <#> to remove.")
+            return
+        n_raw, text = parts[0], parts[1]
+        if not (n_raw.isdigit() and 1 <= int(n_raw) <= len(targets)):
+            await ev.reply("⚠️ Unknown target number — see /targets.")
+            return
+        t = targets[int(n_raw) - 1]
+        av, added = await DB.add_avoid(t["id"], text)
+        if av is None:
+            await ev.reply("⚠️ Target not found.")
+        elif added:
+            await ev.reply(f"✅ Target {n_raw}: will strip \"{text}\" from DB2 captions "
+                           f"({len(av)} avoid-string(s) now).")
+        else:
+            await ev.reply("ℹ️ That string is already on the avoid list.")
+
+    @bot.on(events.NewMessage(pattern=r"^/removeavoid(?:\s+(\d+)\s+(\d+))?$"))
+    async def removeavoid_cmd(ev):
+        if not await _admin(ev.sender_id):
+            return
+        n, idx = ev.pattern_match.group(1), ev.pattern_match.group(2)
+        targets = await DB.get_targets()
+        if not n or not idx or not (1 <= int(n) <= len(targets)):
+            await ev.reply("Usage: /removeavoid <target #> <string #> — numbers from /avoidtext.")
+            return
+        t = targets[int(n) - 1]
+        res = await DB.remove_avoid(t["id"], int(idx))
+        if res is None:
+            await ev.reply("⚠️ No such string number — see /avoidtext.")
+        else:
+            _, removed = res
+            await ev.reply(f"🗑 Target {n}: stopped stripping \"{removed}\".")
 
     # ---------- extra admins (owner-only management, Mongo-backed) ----------
     def _owner(ev):
@@ -675,8 +922,18 @@ def register(scrape_client):
             return
         if kind == "target_db":
             dbid = _parse_chat_id(ev.raw_text)
+            _pending[ev.sender_id] = ("target_db2", (extra, dbid))
+            await ev.reply(f"DB: **{dbid}**\nOptional: send the DB2 (clean mirror) channel id for "
+                           "this target — the BOT will re-post everything from DB into DB2 "
+                           "with credits/links stripped. Send `skip` to leave it off.\n"
+                           "Cancel: /cancel")
+            return
+        if kind == "target_db2":
             _pending.pop(ev.sender_id, None)
-            await _add_target_with_db(scrape_client, ev, extra, dbid)
+            tid, dbid = extra
+            raw = ev.raw_text.strip().lower()
+            db2 = None if raw in ("skip", "-", "none", "off", "0") else _parse_chat_id(ev.raw_text)
+            await _add_target_with_db(scrape_client, ev, tid, dbid, db2)
             return
         if kind == "deltarget":
             _pending.pop(ev.sender_id, None)

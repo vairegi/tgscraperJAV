@@ -44,6 +44,7 @@ Each target's LINK_BOT is discovered per-post from the Download button's own `t.
 | `/ping` | check the bot is alive (works in control bot AND userbot) |
 | `/skip` `/stop` | skip current post / stop |
 | `/replace <ch> "old" "new"` | userbot edits every post containing `old` in that channel, replacing all occurrences |
+| `/replace "old" "new"` | BOT edits every DB2-mirror post containing `old` (2-arg form) |
 | `/deletetext <ch> "text"` | userbot removes `text` from every matching post in that channel |
 | `/massdlt <chat> <start_link> <end_link>` | userbot deletes every message between the two message links (inclusive) — chunked + paced, flood-safe |
 | `/massdlt_status` `/massdlt_stop` | watch / stop the mass-delete |
@@ -52,6 +53,24 @@ Each target's LINK_BOT is discovered per-post from the Download button's own `t.
 | `/add <channel> @bot1 [@bot2 …]` | userbot adds the bot(s) to the channel as ADMIN with as many rights as the userbot itself has |
 | `/addadmin [user id]` | owner adds a bot admin (full control-bot access); bare = list owner + admins |
 | `/removeadmin <user id>` | owner removes a bot admin |
+| `/setdb2 <n> <id\|off>` | set/clear a target's DB2 clean-mirror channel |
+| `/avoidtext [n] ["text"]` | DB2: list or add a credit string to strip from mirrored captions |
+| `/removeavoid <n> <#>` | remove an avoid string |
+
+## DB2 clean mirror (bot-powered)
+Each target can have a second **DB2** channel (set in the `/target` wizard — it
+now asks for it after the DB channel — or later with `/setdb2 <n> <id>`). When
+the userbot posts new content into a target's DB channel, the **control BOT**
+automatically re-posts it into DB2 with a **cleaned caption**: every
+`/avoidtext` string is removed, plus ALL links (`t.me/…`, `http(s)://…`) and
+`@username` mentions are auto-stripped, and embedded-link formatting is
+dropped (captions are re-sent as plain text). Media, spoiler flags and
+buttons are preserved; posts arrive as fresh bot posts with no forward tag.
+**Requirement:** the BOT must be admin in both the DB channel (to see its
+posts) and DB2 (to post). Because DB2 posts are the bot's own, they can be
+re-edited flood-free with `/replace "old" "new"` (2 args = every DB2 channel,
+edited by the BOT; the 3-arg `/replace <ch> "old" "new"` form still uses the
+userbot on any channel).
 
 ## MTProto bulk jobs (mass delete / forward / add-bot)
 All three run as paced background jobs, exactly like the bulk editor: one

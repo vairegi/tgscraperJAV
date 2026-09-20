@@ -32,12 +32,14 @@ async def get_targets():
     for t in doc.get("targets") or []:
         if isinstance(t, dict):
             out.append({"id": t.get("id") or t.get("target_id"), "db_id": t.get("db_id"),
-                        "paused": bool(t.get("paused", False))})
+                        "paused": bool(t.get("paused", False)),
+                        "db2_id": t.get("db2_id"), "avoid": list(t.get("avoid") or [])})
         else:
-            out.append({"id": t, "db_id": None, "paused": False})
+            out.append({"id": t, "db_id": None, "paused": False, "db2_id": None, "avoid": []})
     out = [t for t in out if t["id"] is not None]
     if not out and doc.get("target_id"):
-        out = [{"id": doc["target_id"], "db_id": doc.get("db_id"), "paused": False}]
+        out = [{"id": doc["target_id"], "db_id": doc.get("db_id"), "paused": False,
+                "db2_id": None, "avoid": []}]
     return out
 
 async def _save_targets(targets):
@@ -54,7 +56,7 @@ async def add_target(tid, db_id=None):
             if db_id is not None:
                 t["db_id"] = db_id
             return await _save_targets(targets)
-    targets.append({"id": tid, "db_id": db_id})
+    targets.append({"id": tid, "db_id": db_id, "db2_id": None, "avoid": []})
     return await _save_targets(targets)
 
 async def remove_target(tid):
@@ -70,6 +72,49 @@ async def set_target_db(tid, db_id):
             t["db_id"] = db_id
             return await _save_targets(targets)
     return None  # target not found
+
+async def set_target_db2(tid, db2_id):
+    """Set/clear a target's DB2 clean-mirror channel (None disables)."""
+    targets = await get_targets()
+    for t in targets:
+        if t["id"] == tid:
+            t["db2_id"] = db2_id
+            return await _save_targets(targets)
+    return None  # target not found
+
+async def get_avoids(tid):
+    for t in await get_targets():
+        if t["id"] == tid:
+            return list(t.get("avoid") or [])
+    return []
+
+async def add_avoid(tid, text):
+    """Append an avoid-string for a target's DB2 mirror. Returns (list, added?)."""
+    targets = await get_targets()
+    for t in targets:
+        if t["id"] == tid:
+            av = list(t.get("avoid") or [])
+            if text in av:
+                return av, False
+            av.append(text)
+            t["avoid"] = av
+            await _save_targets(targets)
+            return av, True
+    return None, False
+
+async def remove_avoid(tid, n):
+    """Remove avoid-string #n (1-based) for a target. Returns (list, removed) or None."""
+    targets = await get_targets()
+    for t in targets:
+        if t["id"] == tid:
+            av = list(t.get("avoid") or [])
+            if not (1 <= n <= len(av)):
+                return None
+            removed = av.pop(n - 1)
+            t["avoid"] = av
+            await _save_targets(targets)
+            return av, removed
+    return None
 
 async def set_target_paused(tid, paused):
     """Per-target pause flag — persisted in Mongo so it survives Render
