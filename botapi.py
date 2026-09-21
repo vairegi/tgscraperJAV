@@ -19,6 +19,7 @@ import time
 import random
 import db as DB
 import mtprotomgr as MTM
+import richboard
 from flow import state
 from telethon.tl.types import Channel, Chat, User
 
@@ -28,7 +29,8 @@ _CMDS = [
     ("help",     "Show all commands"),
     ("ping",     "Check the bot is alive"),
     ("target",   "Add target channel + its DB channel (wizard)"),
-    ("targets",  "List targets -> their DB channels + progress"),
+    ("targets",  "Live charge-sheet board (table + buttons) — plain list: /targets_text"),
+    ("targets_text", "Plain markdown targets list (fallback)"),
     ("deltarget","Remove a target channel"),
     ("setdb",    "Change a target's DB channel"),
     ("adddb",    "Set the fallback DB channel"),
@@ -221,10 +223,39 @@ async def _list_targets_text(client=None):
         else:
             db_txt = "(fallback /adddb)"
         if t.get("db2_id"):
-            db_txt += " → DB2 " + await _chat_md(client, t["db2_id"])
+            # v37 FIX: embed the DB2 link too — same invite-link logic as DB
+            link2 = await _db_invite_link(client, t["db2_id"])
+            db_txt += " → DB2 " + await _chat_md(client, t["db2_id"], invite=link2)
         flag = " ⏸" if t.get("paused") else ""
         lines.append(f"  {i+1}. {t_md} → {db_txt} — resume at msg {prog}{flag}")
     return "\n".join(lines)
+
+
+async def _build_board_rows(client):
+    """v37: gather the per-target data the rich charge-sheet board needs.
+    Resolves titles/links once; targets link to their last scraped post (the
+    t.me/c/… trick works for private channels), DB/DB2 use cached invite links."""
+    targets = await DB.get_targets()
+    rows = []
+    for i, t in enumerate(targets):
+        last = await DB.get_last_post(t["id"])
+        rows.append({
+            "n": i + 1,
+            "id": t["id"],
+            "title": await _chat_title(client, t["id"]) or str(t["id"]),
+            "t_link": _c_link(t["id"], last),
+            "db_title": (await _chat_title(client, t["db_id"])
+                         if t.get("db_id") else None),
+            "db_link": (await _db_invite_link(client, t["db_id"])
+                        if t.get("db_id") else None),
+            "db2_title": (await _chat_title(client, t["db2_id"])
+                          if t.get("db2_id") else None),
+            "db2_link": (await _db_invite_link(client, t["db2_id"])
+                         if t.get("db2_id") else None),
+            "resume": await DB.get_progress(t["id"]),
+            "paused": bool(t.get("paused")),
+        })
+    return rows
 
 
 async def _add_target_with_db(scrape_client, ev, tid, dbid, db2=None):
@@ -1008,16 +1039,60 @@ def register(scrape_client):
         await _save_simple(ev, kind, _parse_chat_id(ev.raw_text))
 
     # ---------- view ----------
-    @bot.on(events.NewMessage(pattern=r"^/targets$"))
+    @bot.on(events.NewMessage(pattern=r"^/targets(_text)?$"))
     async def targets_cmd(ev):
         if not await _admin(ev.sender_id):
             return
-        listing = await _list_targets_text(scrape_client)
-        if not listing:
+        plain = ev.pattern_match.group(1) == "_text"
+        targets = await DB.get_targets()
+        if not targets:
             await ev.reply("No target channels. Add one with /target")
             return
+        if not plain:
+            # v37: try the Bot API rich charge sheet (table + coloured buttons);
+            # falls back to the markdown listing when the Bot API server
+            # doesn't support rich messages yet.
+            rows = await _build_board_rows(scrape_client)
+            if await richboard.send_targets_board(ev.chat_id, rows):
+                return
+        listing = await _list_targets_text(scrape_client)
         await ev.reply(listing + "\n\n/setdb to change a DB, /deltarget to remove, "
                                  "/pause <n> //resume <n> to pause/resume one target.")
+
+    @bot.on(events.CallbackQuery(pattern=rb"^tglp:"))
+    async def board_cb(ev):
+        """v37: charge-sheet board buttons (Pause/Resume toggle, Refresh)."""
+        if not await _admin(ev.sender_id):
+            await ev.answer("⛔ Admins only", alert=True)
+            return
+        action, n = richboard.parse_callback(ev.data.decode())
+        if action == "refresh":
+            rows = await _build_board_rows(scrape_client)
+            await richboard.send_targets_board(ev.chat_id, rows)
+            await ev.answer("🔄 Board refreshed")
+            return
+        if action == "toggle":
+            targets = await DB.get_targets()
+            if not (1 <= n <= len(targets)):
+                await ev.answer("⚠️ That target no longer exists", alert=True)
+                return
+            t = targets[n - 1]
+            if t.get("paused"):
+                await DB.set_target_paused(t["id"], False)
+                state.paused_ids.discard(t["id"])
+                state.paused = False; state.user_paused = False
+                state.abort = False; state.started = True
+                state.reset_gen += 1; state._last_scan = None
+                await ev.answer(f"▶️ Target {n} resumed")
+            else:
+                await DB.set_target_paused(t["id"], True)
+                state.paused_ids.add(t["id"])
+                state.reset_gen += 1; state._last_scan = None
+                await ev.answer(f"⏸ Target {n} paused")
+            rows = await _build_board_rows(scrape_client)
+            await richboard.send_targets_board(ev.chat_id, rows)
+            return
+        await ev.answer()
 
     @bot.on(events.NewMessage(pattern=r"^/lastpost(?:\s+(\d+))?$"))
     async def lastpost(ev):
