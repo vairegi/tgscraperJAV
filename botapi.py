@@ -63,6 +63,7 @@ _CMDS = [
     ("setdb2",   "Set a target's DB2 clean-mirror channel: /setdb2 <n> <id|off>"),
     ("avoidtext","DB2: strip a credit string: /avoidtext <n> \"multi word text\" (bare = list)"),
     ("removeavoid", "Remove an avoid string: /removeavoid <n> <#>"),
+    ("checkdm",   "Auto admin pipeline: /checkdm on|off (userbot watches @richmining DMs)"),
 ]
 
 _pending = {}  # user_id -> (kind, extra)
@@ -250,6 +251,7 @@ def register(scrape_client):
             ("🎯 SETUP (targets · DB · bypass)",
              ["target", "targets", "deltarget", "setdb", "adddb", "bypass", "altbypass"]),
             ("🧼 DB2 CLEAN MIRROR (bot)", ["setdb2", "avoidtext", "removeavoid"]),
+            ("🔗 CHECKDM PIPELINE (userbot)", ["checkdm"]),
             ("🔘 LINK-BOT BUTTONS", ["linkbutton", "removelinkbutton"]),
             ("▶️ SCRAPING", ["start", "pause", "resume", "stop", "skip", "cancel"]),
             ("📊 MONITOR", ["status", "current", "progress", "lastpost"]),
@@ -668,6 +670,28 @@ def register(scrape_client):
         else:
             _, removed = res
             await ev.reply(f"🗑 Target {n}: stopped stripping \"{removed}\".")
+
+    # ---------- /checkdm: userbot DM pipeline (@richmining -> auto admin) ----------
+    @bot.on(events.NewMessage(pattern=r"^/checkdm(?:\s+(\S+))?$"))
+    async def checkdm_cmd(ev):
+        if not await _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip().lower()
+        if arg in ("on", "off"):
+            await DB.set_config("checkdm_enabled", arg == "on")
+            if arg == "on":
+                await ev.reply("🔗 checkdm ON — the userbot now watches its DM with "
+                               "@richmining. Send a channel invite link (public "
+                               "t.me/name or private t.me/+hash) and it will: join → "
+                               "wait until it's promoted to admin → add @lifesimplerbot "
+                               "as admin with the same rights the userbot has → leave → "
+                               "reply DONE ✅. Then it's ready for the next link.")
+            else:
+                await ev.reply("🔗 checkdm OFF — invite links from @richmining are ignored.")
+            return
+        cur = bool(await DB.get_config("checkdm_enabled"))
+        await ev.reply(f"🔗 checkdm is {'ON ✅' if cur else 'OFF ❌'}.\n"
+                       "Usage: /checkdm on  |  /checkdm off")
 
     # ---------- extra admins (owner-only management, Mongo-backed) ----------
     def _owner(ev):

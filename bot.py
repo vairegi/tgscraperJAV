@@ -267,6 +267,13 @@ async def main():
              me.first_name, me.id, sm.count(), POSTS_PER_ACCOUNT)
     # NOTE: userbot command handlers are DISABLED (bot-only replies).
     # commands.register(client)  <- uncomment to re-enable Saved-Messages commands
+    # v34: /checkdm pipeline — every userbot session watches @richmining's DM
+    # for invite links (join -> wait for admin -> add @lifesimplerbot -> leave
+    # -> reply DONE). Gated by the checkdm_enabled flag in MongoDB.
+    import checkdm
+    for _c in sm.all():
+        checkdm.register(_c)
+    log.info("checkdm watcher registered on %d session(s)", sm.count())
     await start_health_server(PORT)
     tasks = [
         asyncio.ensure_future(scrape_loop(sm)),

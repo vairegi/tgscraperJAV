@@ -1,33 +1,39 @@
 ================================================================================
-README_PATCH — v33: no duplicate on resume, explicit /pause all / /resume all
+README_PATCH — v34: /checkdm on|off — @richmining invite -> auto admin pipeline
 ================================================================================
 
-DRAG onto the repo root: bot.py, botapi.py, README_PATCH.txt
-(everything else unchanged from v32.)
+DRAG onto the repo root: checkdm.py (NEW), bot.py, botapi.py, README_PATCH.txt
+(everything else unchanged from v33.)
 
-1) NO DUPLICATE ON RESUME (bot.py)
-   Bug: pause a target at post 149, resume -> 149 was scraped AGAIN
-   (duplicate in the DB channel). Cause: v30 saved progress as msg.id - 1,
-   so a resume re-processed the completed post.
-   Fix: progress is saved as msg.id again. The pause-skip that v30 was
-   fixing came from a race — /pause waited for the in-flight post, but the
-   next scan had read the OLD progress before the post finished. The loop
-   already restarts the pass on /pause (reset_gen bump) and re-reads fresh
-   progress, so saving the correct id is now safe: iter_messages(min_id=id)
-   is exclusive, so the finished post is NOT re-scraped and the next post
-   is NOT skipped.
+NEW COMMAND: /checkdm on | /checkdm off   (bare = show current state)
 
-2) + 3) EXPLICIT GLOBAL PAUSE/RESUME (botapi.py)
-   Bare /pause and bare /resume no longer do anything (mistype-proof). They
-   reply with a hint instead:
-     /pause all    — pause everything        /resume all   — resume everything
-     /pause 2      — pause only target 2     /resume 2     — resume target 2
-   The / menu descriptions and the /help tip were updated to match.
+When ON, the USERBOT watches its DM with @richmining. Each channel invite
+link he sends — public (t.me/name) or private (t.me/+hash, t.me/joinchat/…) —
+triggers this pipeline:
+  1. JOIN the channel,
+  2. WAIT until @richmining promotes the userbot to admin (polled every ~5s,
+     up to 15 min),
+  3. ADD @lifesimplerbot as admin with EXACTLY the rights the userbot holds
+     there — never more (Telegram forbids it). Group-only rights are dropped
+     automatically in broadcast channels; one reduced-rights retry if the
+     full set is rejected,
+  4. LEAVE the channel,
+  5. REPLY to the link message: DONE ✅ + the invite link,
+then it's ready for the next link.
 
-TESTING (sandbox mocks, no live Telegram): py_compile PASS; behavior tests
-11 PASS / 0 FAIL — bare /pause and /resume refused with hints, /pause all
-and /resume all work, /resume all clears per-target pause flags, per-target
-/pause 1 / /resume 1 unchanged and shows the resume point, non-numeric args
-get usage, progress saved as msg.id (no -1 anywhere), menu text updated.
-Not tested against live Telegram (no session in sandbox).
+SAFETY: joins are paced, FloodWait slept through in place, up to 5 channels
+processed concurrently, each link handled once. If no admin rights arrive
+within 15 min, the userbot leaves and warns @richmining. The on/off flag is
+MongoDB-backed (survives restarts). Registered on EVERY userbot session, so
+account rotation never breaks it.
+
+TESTING (sandbox mocks, no live Telegram): py_compile PASS on all files;
+behavior tests cover invite parsing (public / +hash / joinchat / no-link),
+the full job flow (join -> poll until promoted -> EditAdminRequest with
+mirrored rights -> LeaveChannelRequest -> DONE reply with the link), the
+timeout path (leaves + warns, no promotion), flag-OFF / wrong-sender /
+non-DM / no-link all ignored, and the /checkdm on|off|status command.
+NOTE: not tested against live Telegram — the first real run depends on
+@richmining actually promoting the userbot (only then can it add
+@lifesimplerbot), so watch the first one in Render logs.
 ================================================================================
