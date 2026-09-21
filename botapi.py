@@ -40,8 +40,8 @@ _CMDS = [
     ("reset",    "Reset a target's progress to post 1"),
     ("lastpost", "Newest post in a target channel"),
     ("start",    "Start scraping"),
-    ("pause",    "Pause all, or one target: /pause 2"),
-    ("resume",   "Resume all, or one target: /resume 2"),
+    ("pause",    "Pause: /pause all (everything) or /pause 2 (one target)"),
+    ("resume",   "Resume: /resume all (everything) or /resume 2 (one target)"),
     ("status",   "Live stage & config"),
     ("current",  "Current post & stage"),
     ("progress", "Stats, last post, failure reasons"),
@@ -278,6 +278,8 @@ def register(scrape_client):
                      "/resume 2 resumes it — bare /pause /resume affects ALL targets. "
                      "When LINK_BOT renames its button: /linkbutton <new text> — "
                      "active instantly, no restart. "
+                     "Bare /pause and /resume do nothing — /pause all / /resume all "
+                     "for everything, or a target number for one. "
                      "Caught-up channels re-scan for new posts every 30s.")
         await ev.reply("\n".join(lines))
 
@@ -1025,7 +1027,7 @@ def register(scrape_client):
         await ev.reply("▶️ Scraper started. It scans each target from its saved point.\n"
                        "Check /progress anytime.")
 
-    @bot.on(events.NewMessage(pattern=r"^/(pause|resume)(?:\s+(\d+))?$"))
+    @bot.on(events.NewMessage(pattern=r"^/(pause|resume)(?:\s+(\S+))?$"))
     async def pause_cmd(ev):
         if not await _admin(ev.sender_id):
             return
@@ -1033,10 +1035,18 @@ def register(scrape_client):
         n = ev.pattern_match.group(2)
         if action == "pause":
             if n is None:
-                # bare /pause — global pause (unchanged behavior)
+                # bare /pause — refuse: global pause must be explicit (/pause all)
+                await ev.reply("⚠️ Bare /pause does nothing now — use /pause <n> for one "
+                               "target, or /pause all to pause everything.")
+                return
+            if n.lower() == "all":
+                # explicit global pause
                 state.paused = True
-                await ev.reply("⏸ Paused. Progress is saved in MongoDB — safe even if "
-                               "Render crashes. /resume to continue.")
+                await ev.reply("⏸ Paused ALL. Progress is saved in MongoDB — safe even if "
+                               "Render crashes. /resume all to continue.")
+                return
+            if not n.isdigit():
+                await ev.reply("Usage: /pause <target #> or /pause all — see /targets for numbers.")
                 return
             targets = await DB.get_targets()
             if not (1 <= int(n) <= len(targets)):
@@ -1055,7 +1065,12 @@ def register(scrape_client):
             return
         # ---- /resume ----
         if n is None:
-            # bare /resume — resume EVERYTHING: global flag + all per-target flags
+            # bare /resume — refuse: global resume must be explicit (/resume all)
+            await ev.reply("⚠️ Bare /resume does nothing now — use /resume <n> for one "
+                           "target, or /resume all to resume everything.")
+            return
+        if n.lower() == "all":
+            # explicit global resume: global flag + all per-target flags
             state.paused = False; state.abort = False; state.started = True
             targets = await DB.get_targets()
             unpaused = 0
@@ -1069,6 +1084,9 @@ def register(scrape_client):
             if unpaused:
                 msg += f" ({unpaused} individually-paused target(s) resumed too.)"
             await ev.reply(msg)
+            return
+        if not n.isdigit():
+            await ev.reply("Usage: /resume <target #> or /resume all — see /targets for numbers.")
             return
         targets = await DB.get_targets()
         if not (1 <= int(n) <= len(targets)):

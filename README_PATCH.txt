@@ -1,27 +1,33 @@
 ================================================================================
-README_PATCH — v32: skip ALL bot images-with-caption
+README_PATCH — v33: no duplicate on resume, explicit /pause all / /resume all
 ================================================================================
 
-DRAG onto the repo root: flow.py, README_PATCH.txt
-(everything else unchanged from v31.)
+DRAG onto the repo root: bot.py, botapi.py, README_PATCH.txt
+(everything else unchanged from v32.)
 
-CHANGE (flow.py): the media-bot collection filter is now a simple rule —
-ANY image (photo OR image-mime document, which is how spoiler cover images
-arrive) that carries a caption is skipped and never forwarded to the DB
-channel. The cover post itself is unaffected: send_cover() sends the cover
-from the TARGET channel directly, and this filter only runs on the media
-bot's collected messages. Videos and .srt files are excluded before the
-filter and are NEVER skipped (a video with a caption is always kept);
-text-only notes (deletion warnings etc.) and caption-less images are still
-mirrored. Skips are logged: "skipped N bot image(s) with caption".
+1) NO DUPLICATE ON RESUME (bot.py)
+   Bug: pause a target at post 149, resume -> 149 was scraped AGAIN
+   (duplicate in the DB channel). Cause: v30 saved progress as msg.id - 1,
+   so a resume re-processed the completed post.
+   Fix: progress is saved as msg.id again. The pause-skip that v30 was
+   fixing came from a race — /pause waited for the in-flight post, but the
+   next scan had read the OLD progress before the post finished. The loop
+   already restarts the pass on /pause (reset_gen bump) and re-reads fresh
+   progress, so saving the correct id is now safe: iter_messages(min_id=id)
+   is exclusive, so the finished post is NOT re-scraped and the next post
+   is NOT skipped.
 
-This replaces the v31 word-overlap echo matching, which only caught echoes
-whose caption matched the cover caption.
+2) + 3) EXPLICIT GLOBAL PAUSE/RESUME (botapi.py)
+   Bare /pause and bare /resume no longer do anything (mistype-proof). They
+   reply with a hint instead:
+     /pause all    — pause everything        /resume all   — resume everything
+     /pause 2      — pause only target 2     /resume 2     — resume target 2
+   The / menu descriptions and the /help tip were updated to match.
 
 TESTING (sandbox mocks, no live Telegram): py_compile PASS; behavior tests
-cover: document-image with caption skipped, photo with caption skipped,
-caption-less photo kept, video with caption kept, .srt kept, text note kept,
-old overlap logic removed, and send_cover() still receives the original
-target-channel message. Not tested against live Telegram (no session in
-sandbox) — watch Render logs for the skip line on the next scraped posts.
+11 PASS / 0 FAIL — bare /pause and /resume refused with hints, /pause all
+and /resume all work, /resume all clears per-target pause flags, per-target
+/pause 1 / /resume 1 unchanged and shows the resume point, non-numeric args
+get usage, progress saved as msg.id (no -1 anywhere), menu text updated.
+Not tested against live Telegram (no session in sandbox).
 ================================================================================

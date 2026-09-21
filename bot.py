@@ -187,13 +187,18 @@ async def scrape_loop(sm):
                 state.current_post = msg.id
                 try:
                     await process_post(client, cfg, msg)
-                    # v30: save msg.id - 1, NOT msg.id. iter_messages(min_id=...)
-                    # is EXCLUSIVE, so saving msg.id makes a pause/restart/resume
-                    # skip the NEXT post (progress 65 -> resumed scan starts at 67,
-                    # post 66 is never processed). Saving id-1 makes the next pass
-                    # start AT this post; it is re-detected as a post and skipped
-                    # after this fast-path check, then progress advances past it.
-                    await DB.set_progress(target, msg.id - 1)
+                    # v33: revert to saving msg.id. The v30 id-1 trick fixed the
+                    # pause-skip, but because the completed post is fully processed
+                    # at this point, resuming re-scrapes it -> DUPLICATE (reported:
+                    # pause at 149, resume -> 149 scraped again). The original pause
+                    # skip came from the in-flight race: /pause waited for the
+                    # current post, yet the OLD progress was read before it
+                    # finished. The scan now re-reads progress on every pass (it
+                    # already restarts on reset_gen bump when /pause runs), so the
+                    # correct id is used. iter_messages(min_id=id) is exclusive, so
+                    # the completed post is not reprocessed and the next post is
+                    # not skipped.
+                    await DB.set_progress(target, msg.id)
                     posts_on_account += 1
                     log.info("post %s done (%s, %d/%d on this account)", msg.id,
                              sm.current_name(), posts_on_account, POSTS_PER_ACCOUNT)
