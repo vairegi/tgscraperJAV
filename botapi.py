@@ -40,8 +40,8 @@ _CMDS = [
     ("reset",    "Reset a target's progress to post 1"),
     ("lastpost", "Newest post in a target channel"),
     ("start",    "Start scraping"),
-    ("pause",    "Pause: /pause all (everything) or /pause 2 (one target)"),
-    ("resume",   "Resume: /resume all (everything) or /resume 2 (one target)"),
+    ("pause",    "Pause all (bare or /pause all), or one: /pause 2"),
+    ("resume",   "Resume all (bare or /resume all), or one: /resume 2"),
     ("status",   "Live stage & config"),
     ("current",  "Current post & stage"),
     ("progress", "Stats, last post, failure reasons"),
@@ -179,6 +179,31 @@ async def _chat_md(client, chat_id, msg_id=None, invite=None):
     return f"[{label}]({link})" if link else label
 
 
+async def _pause_all_targets():
+    """v36: pause the WHOLE scraper PERSISTENTLY and visibly.
+
+    Bare /pause and /pause all used to set only the in-memory state.paused flag.
+    If a post was already in flight the pass kept going, /targets showed no pause
+    marker, and a restart cleared the flag — so it looked like "it didn't pause".
+    We now ALSO flip every target's paused flag in MongoDB (identical to the proven
+    /pause <n> path). The scrape loop's active-target filter then skips them all
+    within seconds, /targets shows the pause marker, and the pause survives restarts.
+
+    Returns (newly_paused_count, total_targets).
+    """
+    state.paused = True
+    state.user_paused = True          # MANUAL pause: bulk-job auto-resume must not clear it
+    targets = await DB.get_targets()
+    flipped = 0
+    for t in targets:
+        if not t.get("paused"):
+            await DB.set_target_paused(t["id"], True)
+            flipped += 1
+        state.paused_ids.add(t["id"])
+    state.reset_gen += 1; state._last_scan = None   # drop any in-flight pass
+    return flipped, len(targets)
+
+
 async def _list_targets_text(client=None):
     targets = await DB.get_targets()
     if not targets:
@@ -276,12 +301,11 @@ def register(scrape_client):
             lines += [L(n) for n in rest]
         lines.append("\nTips: /target walks you through channel + its DB channel. "
                      "/goto accepts a message link (auto-picks the right target). "
-                     "/pause 2 pauses ONLY target 2 (see /targets for numbers), "
-                     "/resume 2 resumes it — bare /pause /resume affects ALL targets. "
+                     "Bare /pause pauses EVERYTHING (also /pause all); /pause 2 pauses "
+                     "ONLY target 2 (see /targets for numbers). Bare /resume resumes "
+                     "everything; /resume 2 resumes one target. "
                      "When LINK_BOT renames its button: /linkbutton <new text> — "
                      "active instantly, no restart. "
-                     "Bare /pause and /resume do nothing — /pause all / /resume all "
-                     "for everything, or a target number for one. "
                      "Caught-up channels re-scan for new posts every 30s.")
         await ev.reply("\n".join(lines))
 
@@ -1058,16 +1082,14 @@ def register(scrape_client):
         action = ev.pattern_match.group(1)
         n = ev.pattern_match.group(2)
         if action == "pause":
-            if n is None:
-                # bare /pause — refuse: global pause must be explicit (/pause all)
-                await ev.reply("⚠️ Bare /pause does nothing now — use /pause <n> for one "
-                               "target, or /pause all to pause everything.")
-                return
-            if n.lower() == "all":
-                # explicit global pause
-                state.paused = True
-                await ev.reply("⏸ Paused ALL. Progress is saved in MongoDB — safe even if "
-                               "Render crashes. /resume all to continue.")
+            if n is None or n.lower() == "all":
+                # v36 FIX: global pause is now persistent + visible (see
+                # _pause_all_targets). Bare /pause or /pause all both trigger it.
+                flipped, total = await _pause_all_targets()
+                await ev.reply("⏸ Paused ALL targets"
+                               + (f" ({flipped} newly paused)" if flipped else " (already paused)")
+                               + ". Progress is saved in MongoDB — safe even if Render "
+                               "crashes. /resume all to continue.")
                 return
             if not n.isdigit():
                 await ev.reply("Usage: /pause <target #> or /pause all — see /targets for numbers.")
@@ -1088,14 +1110,14 @@ def register(scrape_client):
                            f"/resume {n} to resume this one.")
             return
         # ---- /resume ----
-        if n is None:
-            # bare /resume — refuse: global resume must be explicit (/resume all)
-            await ev.reply("⚠️ Bare /resume does nothing now — use /resume <n> for one "
-                           "target, or /resume all to resume everything.")
+        if n is not None and n.lower() != "all" and not n.isdigit():
+            await ev.reply("Usage: /resume <target #>, /resume all, or bare /resume (everything).")
             return
-        if n.lower() == "all":
-            # explicit global resume: global flag + all per-target flags
-            state.paused = False; state.abort = False; state.started = True
+        if n is None or n.lower() == "all":
+            # v35: bare /resume resumes EVERYTHING (same as /resume all):
+            # global flag + manual-pause flag + all per-target flags
+            state.paused = False; state.user_paused = False
+            state.abort = False; state.started = True
             targets = await DB.get_targets()
             unpaused = 0
             for t in targets:
@@ -1120,7 +1142,8 @@ def register(scrape_client):
         t = targets[int(n) - 1]
         await DB.set_target_paused(t["id"], False)
         state.paused_ids.discard(t["id"])
-        state.paused = False; state.abort = False; state.started = True
+        state.paused = False; state.user_paused = False
+        state.abort = False; state.started = True
         state.reset_gen += 1; state._last_scan = None
         rp = await DB.get_progress(t["id"])
         await ev.reply(f"▶️ Target {n} ({t['id']}) resumed — continues from message id {rp}.")
