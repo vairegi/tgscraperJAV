@@ -348,30 +348,28 @@ async def process_post(client, cfg, msg):
     # the document list or every video gets sent twice (vid1,vid1,vid2,vid2)
     vids = [m for m in media if is_video_msg(m)]
     srts = [m for m in media if is_srt_msg(m)]
-    # v31: skip the bot's ECHO of the cover image. The v30 filter only checked
-    # m.photo — but spoiler cover images arrive as DOCUMENTS (m.photo is None),
-    # so it never matched and the echo still landed in the DB channel. Videos
-    # and .srt are already excluded above, so any remaining message carrying
-    # media (photo OR document image) whose caption matches the cover post's
-    # caption is the echo. Matching is word-overlap based (>=80% of the echo's
-    # words appear in the cover caption) so small emoji/spacing differences in
-    # the bot's copy still match. Only IMAGES are skipped — never videos.
-    cover_words = set(re.findall(r"\w+", norm(msg.message or "")))
+    # v32: skip EVERY image-with-caption the media bot sends. Target bots echo
+    # the cover image (and sometimes extra image cards) with captions — the
+    # real cover post is already delivered from the TARGET channel by
+    # send_cover() below, which this filter never touches. An image = photo
+    # OR image-mime document (spoiler images arrive as documents). Videos and
+    # .srt are excluded above and are NEVER skipped; text-only notes stay;
+    # caption-less images stay.
     other = []
-    skipped_echo = 0
+    skipped_img = 0
     for m in media:
         if is_video_msg(m) or is_srt_msg(m):
             continue
-        mcap = norm(getattr(m, "message", "") or "")
-        if cover_words and mcap and getattr(m, "media", None) is not None:
-            mwords = set(re.findall(r"\w+", mcap))
-            if mwords and len(mwords & cover_words) / len(mwords) >= 0.8:
-                skipped_echo += 1
-                continue
+        is_image = bool(getattr(m, "photo", None)) or (
+            getattr(m, "document", None) is not None and
+            (getattr(m.document, "mime_type", "") or "").lower().startswith("image/"))
+        if is_image and (getattr(m, "message", "") or "").strip():
+            skipped_img += 1
+            continue
         other.append(m)
-    if skipped_echo:
-        log.info("post %s: skipped %d bot echo image(s) (caption matches cover)",
-                 msg.id, skipped_echo)
+    if skipped_img:
+        log.info("post %s: skipped %d bot image(s) with caption (cover comes from target channel)",
+                 msg.id, skipped_img)
     if not media:
         raise RuntimeError("bot sent no media")
     log.info("collected %d msg(s): %d video + %d srt + %d other",

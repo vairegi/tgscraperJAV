@@ -1,34 +1,27 @@
 ================================================================================
-README_PATCH — v31: echo-image skip REALLY fixed + DB2 mirror ordering
+README_PATCH — v32: skip ALL bot images-with-caption
 ================================================================================
 
-DRAG onto the repo root: flow.py, botapi.py, README_PATCH.txt
-(bot.py / db.py / mtprotomgr.py / config.py / README.md unchanged from v30.)
+DRAG onto the repo root: flow.py, README_PATCH.txt
+(everything else unchanged from v31.)
 
-1) BOT ECHO COVER-IMAGE — ACTUALLY FIXED THIS TIME (flow.py)
-   The v30 filter checked m.photo — but spoiler cover images arrive as
-   DOCUMENTS (m.photo is None), so it never matched and the echo still landed
-   in the DB channel (the duplicate cover in your screenshot).
-   v31: after videos and .srt are separated out, ANY remaining message with
-   media (photo OR document image) whose caption shares >=80% of its words
-   with the cover post's caption is skipped. Word-overlap (not exact string)
-   so the bot's copy matches even if emoji/spacing differ slightly. Only
-   images are ever skipped — a video with the same caption is ALWAYS kept.
-   Still logged: "skipped N bot echo image(s)".
+CHANGE (flow.py): the media-bot collection filter is now a simple rule —
+ANY image (photo OR image-mime document, which is how spoiler cover images
+arrive) that carries a caption is skipped and never forwarded to the DB
+channel. The cover post itself is unaffected: send_cover() sends the cover
+from the TARGET channel directly, and this filter only runs on the media
+bot's collected messages. Videos and .srt files are excluded before the
+filter and are NEVER skipped (a video with a caption is always kept);
+text-only notes (deletion warnings etc.) and caption-less images are still
+mirrored. Skips are logged: "skipped N bot image(s) with caption".
 
-2) DB2 MIRROR ORDER — COVER FIRST, ALWAYS (botapi.py)
-   Telethon dispatches channel NewMessage events CONCURRENTLY. When the cover
-   copy was slow (large file / flood wait), the next message's copy finished
-   first — DB2 got videos before the cover, uneven order.
-   Fix: a per-DB-channel lock in db2_mirror — messages are mirrored strictly
-   one at a time, in the order they arrived in DB. DB2 order now always
-   equals DB order: cover post first, then videos/srt/notes.
+This replaces the v31 word-overlap echo matching, which only caught echoes
+whose caption matched the cover caption.
 
 TESTING (sandbox mocks, no live Telegram): py_compile PASS; behavior tests
-cover echo image as DOCUMENT skipped, echo photo with emoji differences
-skipped, video with the SAME caption kept, srt/text-notes/unrelated images
-kept, and DB2 ordering preserved even when the cover copy is artificially
-slow (cover lands first). Code presence verified in shipped files.
-Not tested against live Telegram (no session in sandbox) — watch Render logs
-for "skipped N bot echo image(s)" on the next scraped posts.
+cover: document-image with caption skipped, photo with caption skipped,
+caption-less photo kept, video with caption kept, .srt kept, text note kept,
+old overlap logic removed, and send_cover() still receives the original
+target-channel message. Not tested against live Telegram (no session in
+sandbox) — watch Render logs for the skip line on the next scraped posts.
 ================================================================================
