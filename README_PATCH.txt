@@ -1,48 +1,34 @@
 ================================================================================
-README_PATCH — v30: skip bot echo-images, resume off-by-one fix,
-multi-word /avoidtext
+README_PATCH — v31: echo-image skip REALLY fixed + DB2 mirror ordering
 ================================================================================
 
-DRAG onto the repo root: flow.py, bot.py, botapi.py, README_PATCH.txt
-(db.py / README.md / mtprotomgr.py unchanged from v29.)
+DRAG onto the repo root: flow.py, botapi.py, README_PATCH.txt
+(bot.py / db.py / mtprotomgr.py / config.py / README.md unchanged from v30.)
 
-1) SKIP BOT ECHO-IMAGES (flow.py)
-   Some target bots re-send the cover image INSIDE the media batch, with the
-   SAME caption as the target channel's cover post. That image was already
-   delivered by send_cover(), so the DB got the identical cover image twice.
-   Now: any collected message that (a) is a photo and (b) has a caption that
-   matches the cover post's caption (normalized compare, either direction)
-   is skipped — it is NOT forwarded to the DB channel. Videos, .srt files,
-   text notes (like deletion warnings) and any genuinely different images
-   are still mirrored exactly as before.
+1) BOT ECHO COVER-IMAGE — ACTUALLY FIXED THIS TIME (flow.py)
+   The v30 filter checked m.photo — but spoiler cover images arrive as
+   DOCUMENTS (m.photo is None), so it never matched and the echo still landed
+   in the DB channel (the duplicate cover in your screenshot).
+   v31: after videos and .srt are separated out, ANY remaining message with
+   media (photo OR document image) whose caption shares >=80% of its words
+   with the cover post's caption is skipped. Word-overlap (not exact string)
+   so the bot's copy matches even if emoji/spacing differ slightly. Only
+   images are ever skipped — a video with the same caption is ALWAYS kept.
+   Still logged: "skipped N bot echo image(s)".
 
-2) RESUME OFF-BY-ONE FIX (bot.py)
-   Bug: progress was saved as msg.id AFTER a post finished, but
-   iter_messages(min_id=...) is EXCLUSIVE — so after a pause/restart the
-   scan resumed one message too late. (Scraped up to 65 -> resume -> 66 got
-   skipped, 67 scraped instead.)
-   Fix: on success the scraper now saves msg.id - 1. The next pass starts AT
-   the just-finished post, re-detects it, and moves past it — so the truly
-   next post (66) is never skipped.
+2) DB2 MIRROR ORDER — COVER FIRST, ALWAYS (botapi.py)
+   Telethon dispatches channel NewMessage events CONCURRENTLY. When the cover
+   copy was slow (large file / flood wait), the next message's copy finished
+   first — DB2 got videos before the cover, uneven order.
+   Fix: a per-DB-channel lock in db2_mirror — messages are mirrored strictly
+   one at a time, in the order they arrived in DB. DB2 order now always
+   equals DB order: cover post first, then videos/srt/notes.
 
-3) MULTI-WORD /avoidtext (botapi.py)
-   Before, only a single word (or properly quoted text) worked. Now
-   everything after the target number is the string to strip, quoted OR not:
-       /avoidtext 1 "how are you"
-       /avoidtext 1 how are you
-   both store "how are you".
-
-   MANAGING THE LIST (already built in, unchanged):
-       /avoidtext            — list avoid-strings for ALL targets
-       /avoidtext 2          — list them for target 2 (numbered)
-       /removeavoid 2 1      — remove string #1 from target 2
-
-TESTING (sandbox mocks, no live Telegram): py_compile PASS on all changed
-files; behavior tests 15 PASS / 0 FAIL (echo image skipped, video/srt/notes/
-different photos kept, empty-caption edge case, progress saved as id-1 and
-resume scan covering the next post, quoted + unquoted multi-word avoid
-parsing, all three code changes present in the shipped files).
-NOTE: after this deploy, each channel's saved progress is one less than
-before — the first scan re-checks the last completed post once (it is
-detected as already-scraped and skipped), then continues normally.
+TESTING (sandbox mocks, no live Telegram): py_compile PASS; behavior tests
+cover echo image as DOCUMENT skipped, echo photo with emoji differences
+skipped, video with the SAME caption kept, srt/text-notes/unrelated images
+kept, and DB2 ordering preserved even when the cover copy is artificially
+slow (cover lands first). Code presence verified in shipped files.
+Not tested against live Telegram (no session in sandbox) — watch Render logs
+for "skipped N bot echo image(s)" on the next scraped posts.
 ================================================================================

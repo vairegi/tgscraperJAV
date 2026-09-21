@@ -348,25 +348,29 @@ async def process_post(client, cfg, msg):
     # the document list or every video gets sent twice (vid1,vid1,vid2,vid2)
     vids = [m for m in media if is_video_msg(m)]
     srts = [m for m in media if is_srt_msg(m)]
-    # v30: skip the bot's ECHO of the cover image — some target bots resend the
-    # cover image with the SAME caption as the target's cover post. That image
-    # is already delivered by send_cover() above; forwarding the echo too puts
-    # the identical cover image twice into the DB channel (once per cover,
-    # once per media batch).
-    cover_cap = norm(msg.message or "")
+    # v31: skip the bot's ECHO of the cover image. The v30 filter only checked
+    # m.photo — but spoiler cover images arrive as DOCUMENTS (m.photo is None),
+    # so it never matched and the echo still landed in the DB channel. Videos
+    # and .srt are already excluded above, so any remaining message carrying
+    # media (photo OR document image) whose caption matches the cover post's
+    # caption is the echo. Matching is word-overlap based (>=80% of the echo's
+    # words appear in the cover caption) so small emoji/spacing differences in
+    # the bot's copy still match. Only IMAGES are skipped — never videos.
+    cover_words = set(re.findall(r"\w+", norm(msg.message or "")))
     other = []
     skipped_echo = 0
     for m in media:
         if is_video_msg(m) or is_srt_msg(m):
             continue
         mcap = norm(getattr(m, "message", "") or "")
-        if (getattr(m, "photo", None) and cover_cap and mcap and
-                (mcap == cover_cap or mcap in cover_cap or cover_cap in mcap)):
-            skipped_echo += 1
-            continue
+        if cover_words and mcap and getattr(m, "media", None) is not None:
+            mwords = set(re.findall(r"\w+", mcap))
+            if mwords and len(mwords & cover_words) / len(mwords) >= 0.8:
+                skipped_echo += 1
+                continue
         other.append(m)
     if skipped_echo:
-        log.info("post %s: skipped %d bot echo image(s) (same caption as cover)",
+        log.info("post %s: skipped %d bot echo image(s) (caption matches cover)",
                  msg.id, skipped_echo)
     if not media:
         raise RuntimeError("bot sent no media")

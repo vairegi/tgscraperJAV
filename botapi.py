@@ -489,15 +489,22 @@ def register(scrape_client):
                 return False
         return False
 
+    _DB2_LOCKS = {}  # db chat_id -> asyncio.Lock (order preservation)
+
     @bot.on(events.NewMessage())
     async def db2_mirror(ev):
         """Auto-mirror: userbot posts to DB -> bot re-posts to DB2 cleaned.
         Requires the BOT to be admin in BOTH DB (to receive channel posts) and
-        DB2 (to post)."""
+        DB2 (to post). Serialized per DB channel: Telethon dispatches channel
+        events concurrently, so without this lock a slow/flooded cover copy
+        could finish AFTER the next message's copy — DB2 got videos before the
+        cover. The lock guarantees DB2 order == DB order (cover first)."""
         t = (await _db2_map()).get(ev.chat_id)
         if not t:
             return
-        await _copy_to_db2(ev.message, t["db2_id"], t.get("avoid") or [])
+        lock = _DB2_LOCKS.setdefault(ev.chat_id, asyncio.Lock())
+        async with lock:
+            await _copy_to_db2(ev.message, t["db2_id"], t.get("avoid") or [])
 
     async def _db2_bulk_edit(ev, old, new):
         """BOT edits every message containing `old` in every DB2 channel —
