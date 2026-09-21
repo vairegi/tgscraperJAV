@@ -61,7 +61,7 @@ _CMDS = [
     ("addadmin", "Add a bot admin (bare /addadmin lists them)"),
     ("removeadmin", "Remove a bot admin: /removeadmin <user id>"),
     ("setdb2",   "Set a target's DB2 clean-mirror channel: /setdb2 <n> <id|off>"),
-    ("avoidtext","DB2: strip a credit string: /avoidtext <n> \"text\" (bare = list)"),
+    ("avoidtext","DB2: strip a credit string: /avoidtext <n> \"multi word text\" (bare = list)"),
     ("removeavoid", "Remove an avoid string: /removeavoid <n> <#>"),
 ]
 
@@ -626,7 +626,10 @@ def register(scrape_client):
                            + ("\n".join(f"  {j+1}. \"{a}\"" for j, a in enumerate(av)) if av else "  (none)")
                            + "\n\n/avoidtext " + parts[0] + " \"text\" to add, /removeavoid " + parts[0] + " <#> to remove.")
             return
-        n_raw, text = parts[0], parts[1]
+        # v30: multi-word avoid strings — after the target number, EVERYTHING
+        # (quoted or not) is the string to strip, so both of these work:
+        #   /avoidtext 1 "how are you"   and   /avoidtext 1 how are you
+        n_raw, text = parts[0], " ".join(parts[1:]).strip()
         if not (n_raw.isdigit() and 1 <= int(n_raw) <= len(targets)):
             await ev.reply("⚠️ Unknown target number — see /targets.")
             return

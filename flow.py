@@ -348,7 +348,26 @@ async def process_post(client, cfg, msg):
     # the document list or every video gets sent twice (vid1,vid1,vid2,vid2)
     vids = [m for m in media if is_video_msg(m)]
     srts = [m for m in media if is_srt_msg(m)]
-    other = [m for m in media if not is_video_msg(m) and not is_srt_msg(m)]
+    # v30: skip the bot's ECHO of the cover image — some target bots resend the
+    # cover image with the SAME caption as the target's cover post. That image
+    # is already delivered by send_cover() above; forwarding the echo too puts
+    # the identical cover image twice into the DB channel (once per cover,
+    # once per media batch).
+    cover_cap = norm(msg.message or "")
+    other = []
+    skipped_echo = 0
+    for m in media:
+        if is_video_msg(m) or is_srt_msg(m):
+            continue
+        mcap = norm(getattr(m, "message", "") or "")
+        if (getattr(m, "photo", None) and cover_cap and mcap and
+                (mcap == cover_cap or mcap in cover_cap or cover_cap in mcap)):
+            skipped_echo += 1
+            continue
+        other.append(m)
+    if skipped_echo:
+        log.info("post %s: skipped %d bot echo image(s) (same caption as cover)",
+                 msg.id, skipped_echo)
     if not media:
         raise RuntimeError("bot sent no media")
     log.info("collected %d msg(s): %d video + %d srt + %d other",

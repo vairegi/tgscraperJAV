@@ -187,7 +187,13 @@ async def scrape_loop(sm):
                 state.current_post = msg.id
                 try:
                     await process_post(client, cfg, msg)
-                    await DB.set_progress(target, msg.id)
+                    # v30: save msg.id - 1, NOT msg.id. iter_messages(min_id=...)
+                    # is EXCLUSIVE, so saving msg.id makes a pause/restart/resume
+                    # skip the NEXT post (progress 65 -> resumed scan starts at 67,
+                    # post 66 is never processed). Saving id-1 makes the next pass
+                    # start AT this post; it is re-detected as a post and skipped
+                    # after this fast-path check, then progress advances past it.
+                    await DB.set_progress(target, msg.id - 1)
                     posts_on_account += 1
                     log.info("post %s done (%s, %d/%d on this account)", msg.id,
                              sm.current_name(), posts_on_account, POSTS_PER_ACCOUNT)

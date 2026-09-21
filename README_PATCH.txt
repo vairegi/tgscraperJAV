@@ -1,49 +1,48 @@
 ================================================================================
-README_PATCH — v29: DB2 clean mirror (bot-powered), /setdb2, /avoidtext,
-2-arg /replace for DB2
+README_PATCH — v30: skip bot echo-images, resume off-by-one fix,
+multi-word /avoidtext
 ================================================================================
 
-DRAG onto the repo root: botapi.py, db.py, README.md  (bot.py / mtprotomgr.py /
-config.py unchanged from v28.)
+DRAG onto the repo root: flow.py, bot.py, botapi.py, README_PATCH.txt
+(db.py / README.md / mtprotomgr.py unchanged from v29.)
 
-THE PROBLEM: DB posts come from the USERBOT, so editing their captions means
-userbot edits — slow, flood-prone, one-by-one.
+1) SKIP BOT ECHO-IMAGES (flow.py)
+   Some target bots re-send the cover image INSIDE the media batch, with the
+   SAME caption as the target channel's cover post. That image was already
+   delivered by send_cover(), so the DB got the identical cover image twice.
+   Now: any collected message that (a) is a photo and (b) has a caption that
+   matches the cover post's caption (normalized compare, either direction)
+   is skipped — it is NOT forwarded to the DB channel. Videos, .srt files,
+   text notes (like deletion warnings) and any genuinely different images
+   are still mirrored exactly as before.
 
-THE FIX — a second "DB2" channel per target, powered by the BOT:
-- /target wizard now asks for the DB channel AND THEN an optional DB2 channel
-  (send `skip` to leave it off). Existing targets: /setdb2 <target #> <id|off>
-  — NO need to remove/re-add targets (and progress is never lost either way;
-  see below).
-- When the userbot posts anything into a target's DB channel, the BOT
-  automatically re-posts it into DB2 as a FRESH post (no forward tag) with a
-  CLEANED caption: every /avoidtext string removed, plus ALL links
-  (t.me/…, http(s)://…) and @mentions auto-stripped, embedded-link formatting
-  dropped (captions go out as plain text). Media, spoiler flag and buttons
-  are preserved. REQUIREMENT: the BOT must be admin in BOTH the DB channel
-  (to see its posts) and DB2 (to post).
-- /avoidtext "text" — manage the strip list per target:
-      /avoidtext               list avoid-strings for every target
-      /avoidtext 2             list them for target 2
-      /avoidtext 2 "join us"   strip "join us" from target 2's DB2 captions
-      /removeavoid 2 1         remove string #1
-- /replace "old" "new" — the 2-argument form now edits every DB2 channel
-  WITH THE BOT (DB2 posts are the bot's own, so editing is allowed — no
-  userbot, no flood hassle). The 3-arg form /replace <ch> "old" "new" is
-  unchanged (userbot edits any channel).
-- /targets shows each target's DB2 channel inline:  Target → DB → DB2.
+2) RESUME OFF-BY-ONE FIX (bot.py)
+   Bug: progress was saved as msg.id AFTER a post finished, but
+   iter_messages(min_id=...) is EXCLUSIVE — so after a pause/restart the
+   scan resumed one message too late. (Scraped up to 65 -> resume -> 66 got
+   skipped, 67 scraped instead.)
+   Fix: on success the scraper now saves msg.id - 1. The next pass starts AT
+   the just-finished post, re-detects it, and moves past it — so the truly
+   next post (66) is never skipped.
 
-YOUR QUESTION — adding DB2 to the existing 6 targets: just run
-/setdb2 1 <id> … /setdb2 6 <id>. Removing and re-adding is NOT needed. If you
-DID remove a target and add it again later, its progress is KEPT
-(/deltarget never deletes progress) — it resumes from the last scraped
-message, not from the start. Both paths are safe.
+3) MULTI-WORD /avoidtext (botapi.py)
+   Before, only a single word (or properly quoted text) worked. Now
+   everything after the target number is the string to strip, quoted OR not:
+       /avoidtext 1 "how are you"
+       /avoidtext 1 how are you
+   both store "how are you".
 
-TESTING (sandbox mocks, no live Telegram): py_compile PASS on all files;
-behavior tests cover target migration with db2_id/avoid, set/add/remove
-avoid strings, wizard asking for DB2 (skip path), /setdb2 set/off by target
-number, /avoidtext add+list, /removeavoid, the DB→DB2 mirror copying media
-with @mentions/links/avoid-strings stripped and spoiler preserved, non-DB
-chats ignored, text-only mirroring, and 2-arg /replace editing DB2 via the
-bot. One real-world check after deploy: make sure the BOT is admin in the DB
-channels (or it won't receive their posts to mirror).
+   MANAGING THE LIST (already built in, unchanged):
+       /avoidtext            — list avoid-strings for ALL targets
+       /avoidtext 2          — list them for target 2 (numbered)
+       /removeavoid 2 1      — remove string #1 from target 2
+
+TESTING (sandbox mocks, no live Telegram): py_compile PASS on all changed
+files; behavior tests 15 PASS / 0 FAIL (echo image skipped, video/srt/notes/
+different photos kept, empty-caption edge case, progress saved as id-1 and
+resume scan covering the next post, quoted + unquoted multi-word avoid
+parsing, all three code changes present in the shipped files).
+NOTE: after this deploy, each channel's saved progress is one less than
+before — the first scan re-checks the last completed post once (it is
+detected as already-scraped and skipped), then continues normally.
 ================================================================================
