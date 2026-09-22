@@ -1,37 +1,33 @@
-"""richboard.py — Bot API rich-message "charge sheet" board (v37).
+"""richboard.py — Bot API rich-message "charge sheet" board (v38).
 
 Telethon (MTProto) can't render tables or colored inline buttons — those are
 Bot API features (rich messages: sendRichMessage, Bot API 10.1+; button style:
 danger/success/primary, Bot API 9.4+). This module is a thin aiohttp client on
-top of the existing BOT_TOKEN that ONLY sends messages — it never polls, so the
-Telethon control bot keeps receiving updates (incl. the board's button taps via
-events.CallbackQuery) exactly as before.
+top of the existing BOT_TOKEN that only sends / edits messages — it never polls,
+so the Telethon control bot keeps receiving updates (incl. the board's button
+taps via events.CallbackQuery) exactly as before.
 
-Usage:
-    ok = await richboard.send_targets_board(chat_id, rows)
-    # ok=False  -> feature unsupported / send failed -> caller falls back to
-    #              the plain markdown /targets listing.
+Board features (v38):
+  * 2-column button grid — Pause/Resume buttons pair up side-by-side; an odd
+    last button goes full-width on its own row; Refresh is always last row.
+  * In-place refresh — tapping a button EDITS the same board message
+    (editMessageText with rich_message) instead of cluttering the chat.
+  * Board expiry — buttons stop working after BOARD_TTL seconds; a late tap
+    gets a popup "This board has expired. Run /targets to open a fresh board."
+  * Linked cells everywhere — target titles link to their last scraped post
+    (t.me/c/…), DB/DB2 use cached invite links.
 
 rows = [{
-    "n": 1,                       # target number (1-based)
-    "title": "Channel title",     # target title (plain text)
-    "t_link": "https://t.me/...", # target link (t.me/c/<id>/<last_post>) or None
-    "db_title": "DB title", "db_link": "https://t.me/+...",   # or None
-    "db2_title": "DB2 title", "db2_link": "https://t.me/+...",# or None
-    "resume": 372,                # resume message id
-    "paused": False,
+    "n": 1, "id": -100…, "title": "Channel title",
+    "t_link": "https://t.me/c/<id>/<last>",      # or None
+    "db_title": "DB title", "db_link": "…",      # or None
+    "db2_title": "DB2 title", "db2_link": "…",   # or None
+    "resume": 372, "paused": False,
 }, ...]
-
-Board layout:
-    heading: 🎯 TARGETS
-    table:   N | Target | DB | DB2 | Resume   (linked titles, ⏸ marks paused)
-    buttons: one row per target -> Pause/Resume toggle (danger/success colour),
-             bottom row -> 🔄 Refresh (primary).
-Callback data: "tglp:t:<n>" (toggle target n), "tglp:refresh".
 """
 import asyncio
-import json
 import logging
+import time
 
 import aiohttp
 
@@ -42,13 +38,19 @@ log = logging.getLogger("richboard")
 _API = "https://api.telegram.org/bot{tok}/{method}"
 _TIMEOUT = aiohttp.ClientTimeout(total=20)
 
+BOARD_TTL = 150          # seconds before board buttons expire (2.5 min)
+
 CB_PREFIX = "tglp:"          # callback namespace for this module
 CB_REFRESH = CB_PREFIX + "refresh"
 CB_TOGGLE = CB_PREFIX + "t:"  # + <n>
 
+# message_id of the board we currently control per chat (one live board/chat)
+_BOARDS = {}            # chat_id -> {"msg_id": int, "ts": float}
+_BOARD_TS = {}          # msg_id -> monotonic ts (per-message expiry, capped)
+
 
 # ---------------------------------------------------------------------------
-# low-level Bot API call (send-only; never long-polls)
+# low-level Bot API call (send/edit only; never long-polls)
 # ---------------------------------------------------------------------------
 async def api_call(method, payload):
     """POST one Bot API method. Returns (ok: bool, result_or_error)."""
@@ -89,6 +91,23 @@ def _cell(title, url=None, header=False, align="left"):
 # ---------------------------------------------------------------------------
 # board construction
 # ---------------------------------------------------------------------------
+def _grid_keyboard(rows):
+    """2-column Pause/Resume grid. An odd leftover goes full-width on its own
+    row; Refresh always occupies the final full-width row."""
+    btns = []
+    for r in rows:
+        if r.get("paused"):
+            btns.append({"text": f"▶️ Resume {r['n']}", "style": "success",
+                         "callback_data": f"{CB_TOGGLE}{r['n']}"})
+        else:
+            btns.append({"text": f"⏸ Pause {r['n']}", "style": "danger",
+                         "callback_data": f"{CB_TOGGLE}{r['n']}"})
+    grid = [btns[i:i + 2] for i in range(0, len(btns), 2)]  # pairs; odd->1-wide
+    grid.append([{"text": "🔄 Refresh", "style": "primary",
+                  "callback_data": CB_REFRESH}])
+    return grid
+
+
 def build_targets_payload(chat_id, rows):
     """Full sendRichMessage payload for the targets charge sheet."""
     header = [
@@ -99,7 +118,6 @@ def build_targets_payload(chat_id, rows):
         _cell("Resume", header=True, align="right"),
     ]
     cells = [header]
-    buttons = []
     for r in rows:
         flag = "⏸ " if r.get("paused") else ""
         cells.append([
@@ -109,55 +127,93 @@ def build_targets_payload(chat_id, rows):
             _cell(r.get("db2_title") or "—", r.get("db2_link")),
             _cell(str(r.get("resume", 0)), align="right"),
         ])
-        if r.get("paused"):
-            buttons.append([{"text": f"▶️ Resume {r['n']}",
-                             "style": "success",
-                             "callback_data": f"{CB_TOGGLE}{r['n']}"}])
-        else:
-            buttons.append([{"text": f"⏸ Pause {r['n']}",
-                             "style": "danger",
-                             "callback_data": f"{CB_TOGGLE}{r['n']}"}])
-    buttons.append([{"text": "🔄 Refresh", "style": "primary",
-                     "callback_data": CB_REFRESH}])
-
     return {
         "chat_id": chat_id,
         "rich_message": {
             "blocks": [
-                {"type": "heading", "size": 3,
-                 "text": "🎯 TARGETS — live board"},
-                {"type": "table",
-                 "is_bordered": True, "is_striped": True, "is_compact": True,
-                 "cells": cells},
+                {"type": "heading", "size": 3, "text": "🎯 TARGETS — live board"},
+                {"type": "table", "is_bordered": True, "is_striped": True,
+                 "is_compact": True, "cells": cells},
                 {"type": "footer",
                  "text": "DB = storage · DB2 = clean mirror · tap a button to "
                          "pause/resume · /targets_text for the plain list"},
             ],
         },
-        "reply_markup": {"inline_keyboard": buttons},
+        "reply_markup": {"inline_keyboard": _grid_keyboard(rows)},
     }
 
 
+# ---------------------------------------------------------------------------
+# send / in-place edit
+# ---------------------------------------------------------------------------
 async def send_targets_board(chat_id, rows, retries=2):
-    """Send the targets charge sheet. Returns True on success, False to fall
-    back to the plain markdown listing (unsupported Bot API, old server, etc)."""
+    """Send a fresh targets board and remember its message_id for later edits.
+    Returns True on success, False to fall back to the markdown listing."""
     if not BOT_TOKEN or not rows:
         return False
     payload = build_targets_payload(chat_id, rows)
     for attempt in range(retries + 1):
         ok, res = await api_call("sendRichMessage", payload)
         if ok:
+            msg_id = res.get("message_id") if isinstance(res, dict) else None
+            mark_board(chat_id, msg_id)
             return True
-        desc = str(res)
-        # hard failures that retrying won't fix (old Bot API server, rich
-        # messages unsupported, chat can't be reached) -> fall back at once
-        if any(k in desc.lower() for k in
-               ("rich", "unsupported", "can't parse", "chat not found",
-                "forbidden", "not found", "bad request")):
+        desc = str(res).lower()
+        if any(k in desc for k in ("rich", "unsupported", "can't parse",
+                                   "chat not found", "forbidden", "not found",
+                                   "bad request")):
             log.warning("rich board unsupported (%s) — markdown fallback", desc)
             return False
         await asyncio.sleep(1.5 * (attempt + 1))
     return False
+
+
+async def edit_targets_board(chat_id, message_id, rows):
+    """Edit an existing board in place (Refresh / toggle). Falls back to a new
+    message if the edit fails (message gone, too old, etc)."""
+    payload = build_targets_payload(chat_id, rows)
+    payload["message_id"] = message_id
+    ok, res = await api_call("editMessageText", payload)
+    if ok:
+        mark_board(chat_id, message_id)
+        return True
+    log.warning("editMessageText failed (%s) — sending fresh board", res)
+    return await send_targets_board(chat_id, rows)
+
+
+async def refresh_board(chat_id, rows):
+    """Edit the live board in place if we know its id, else send a new one."""
+    live = _BOARDS.get(chat_id)
+    if live and live.get("msg_id"):
+        return await edit_targets_board(chat_id, live["msg_id"], rows)
+    return await send_targets_board(chat_id, rows)
+
+
+# ---------------------------------------------------------------------------
+# expiry + callback decode
+# ---------------------------------------------------------------------------
+def board_expired(chat_id, message_id=None, ts=None):
+    """True when the tapped board is older than BOARD_TTL. Checks the specific
+    message's send time first, then the tracked live board for the chat."""
+    if ts is not None:
+        return (time.monotonic() - ts) > BOARD_TTL
+    if message_id is not None and message_id in _BOARD_TS:
+        return (time.monotonic() - _BOARD_TS[message_id]) > BOARD_TTL
+    live = _BOARDS.get(chat_id)
+    if not live:
+        return False                          # unknown board -> don't block
+    return (time.monotonic() - live["ts"]) > BOARD_TTL
+
+
+def mark_board(chat_id, message_id):
+    """Record the live board id/timestamp (used for in-place edits + expiry)."""
+    ts = time.monotonic()
+    _BOARDS[chat_id] = {"msg_id": message_id, "ts": ts}
+    if message_id is not None:
+        _BOARD_TS[message_id] = ts
+        if len(_BOARD_TS) > 200:              # cap memory
+            for k in list(_BOARD_TS)[:100]:
+                _BOARD_TS.pop(k, None)
 
 
 def parse_callback(data):

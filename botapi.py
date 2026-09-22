@@ -231,6 +231,15 @@ async def _list_targets_text(client=None):
     return "\n".join(lines)
 
 
+async def _target_link(client, tid, last_post):
+    """v38: ALWAYS give a target a tappable link. Preferred: an invite link
+    minted by the userbot (it is admin in the target channels) and cached in
+    Mongo — works even before the first post is scraped. Fallback: the
+    t.me/c/<id>/<last_post> trick once scraping has started."""
+    inv = await _db_invite_link(client, tid)
+    return inv or _c_link(tid, last_post)
+
+
 async def _build_board_rows(client):
     """v37: gather the per-target data the rich charge-sheet board needs.
     Resolves titles/links once; targets link to their last scraped post (the
@@ -243,7 +252,7 @@ async def _build_board_rows(client):
             "n": i + 1,
             "id": t["id"],
             "title": await _chat_title(client, t["id"]) or str(t["id"]),
-            "t_link": _c_link(t["id"], last),
+            "t_link": await _target_link(client, t["id"], last),
             "db_title": (await _chat_title(client, t["db_id"])
                          if t.get("db_id") else None),
             "db_link": (await _db_invite_link(client, t["db_id"])
@@ -1066,9 +1075,15 @@ def register(scrape_client):
             await ev.answer("⛔ Admins only", alert=True)
             return
         action, n = richboard.parse_callback(ev.data.decode())
+        # v38: boards expire after BOARD_TTL — late taps get a popup instead
+        # of acting on a stale board (saves server resources too)
+        if richboard.board_expired(ev.chat_id, getattr(ev, "message_id", None)):
+            await ev.answer("This board has expired. Run /targets to open a fresh board.",
+                            alert=True)
+            return
         if action == "refresh":
             rows = await _build_board_rows(scrape_client)
-            await richboard.send_targets_board(ev.chat_id, rows)
+            await richboard.refresh_board(ev.chat_id, rows)   # edits in place
             await ev.answer("🔄 Board refreshed")
             return
         if action == "toggle":
@@ -1090,7 +1105,7 @@ def register(scrape_client):
                 state.reset_gen += 1; state._last_scan = None
                 await ev.answer(f"⏸ Target {n} paused")
             rows = await _build_board_rows(scrape_client)
-            await richboard.send_targets_board(ev.chat_id, rows)
+            await richboard.refresh_board(ev.chat_id, rows)   # edits in place
             return
         await ev.answer()
 
