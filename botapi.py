@@ -791,7 +791,10 @@ def register(scrape_client):
 
     @bot.on(events.NewMessage(pattern=r"^/addadmin(?:\s+(\S+))?$"))
     async def addadmin_cmd(ev):
-        if not _owner(ev):
+        # v39: gate on _admin (any existing admin), NOT _owner. _owner only
+        # passes for ev.sender_id == ADMIN_USER_ID, so messaging from a second
+        # account silently did nothing ('no response'). Any admin may add more.
+        if not await _admin(ev.sender_id):
             return
         arg = (ev.pattern_match.group(1) or "").strip()
         if not arg:
@@ -818,7 +821,9 @@ def register(scrape_client):
 
     @bot.on(events.NewMessage(pattern=r"^/removeadmin(?:\s+(\S+))?$"))
     async def removeadmin_cmd(ev):
-        if not _owner(ev):
+        # v39: same _admin gate as /addadmin (was _owner -> silent no-op for
+        # non-owner admins).
+        if not await _admin(ev.sender_id):
             return
         arg = (ev.pattern_match.group(1) or "").strip()
         if not arg:
