@@ -1,125 +1,22 @@
-================================================================================
-README_PATCH — v39.1: resume-visibility logging + /checkram + addadmin gate fix
-================================================================================
-
-DRAG onto the repo root: bot.py, botapi.py, README.md, README_PATCH.txt
-(everything else unchanged from v39.)
-
-1) RESUME-VISIBILITY (bot.py): the parallel dispatcher now LOGS what it sees —
-   a membership pre-check ('account 1 cannot READ target … every userbot must
-   be a MEMBER'), a 'caught up — no new posts' line when a resumed target has
-   nothing to scrape, and a per-wave 'parallel wave: posts [..] -> accounts [..]'
-   line. Worker failures now include the exception type + a join-channel hint.
-   Root cause of 'resumed but silent' is now visible in the Render log instead
-   of guessing.
-
-2) /checkram (botapi.py): shows the process RSS and the container's cgroup RAM
-   usage/limit — watch Render's 512 MB free-tier cap without opening the
-   dashboard. Added to the command menu and /help (INFO section).
-
-3) /addadmin + /removeadmin: re-applies the _owner -> _admin gate fix if the
-   repo still had the old gate (any existing admin can manage admins; no more
-   silent no-reply when messaging from a second account).
-
-TESTING: py_compile PASS on bot.py + botapi.py. /checkram reads /proc/self/
-status + /sys/fs/cgroup (no new dependency — requirements.txt untouched).
-================================================================================
 
 ================================================================================
-README_PATCH — v39: parallel multi-userbot scraping + multi-bypass routing
+README_PATCH — v41: /stats v2 + /removeavoid N + replace-wins guarantee
 ================================================================================
 
-DRAG onto the repo root: bot.py, flow.py, forwarder.py, scraper.py, db.py,
-botapi.py, README.md, README_PATCH.txt (everything else unchanged from v38).
+DRAG onto the repo root: botapi.py, README_PATCH.txt (everything else unchanged).
 
---------------------------------------------------------------------------------
-1) PARALLEL MULTI-USERBOT SCRAPING + STRICT DB DELIVERY LOCKING
---------------------------------------------------------------------------------
-• With 2+ StringSessions, accounts no longer rotate one-after-another — they
-  scrape the CURRENT target's pending posts IN PARALLEL (acc1 -> post #1,
-  acc2 -> post #2, …). One remaining post -> any one free account handles it.
-• STRICT DELIVERY: forwarder.deliver_post_bundle() holds a per-DB-channel
-  asyncio lock for a post's WHOLE bundle — cover post FIRST, then all its
-  videos/srt/other. A second userbot's post waits in line, so posts never
-  interleave in DB. DB2 inherits the order via botapi's own per-DB lock.
-• PROGRESS SAFETY: progress only advances to the highest CONTIGUOUS resolved
-  message id, so an out-of-order finish or a flood-parked account can never
-  make the scraper skip a post. A FloodWait parks just that account (its post
-  is retried next pass) — no whole-loop restart, no crash loop.
-• One target at a time: when it's caught up, the next pass moves to the next
-  resumed target and fans its posts across all accounts the same way.
-• Single account => the ORIGINAL sequential path runs, untouched.
-• /pause lets in-flight posts finish (no new wave); /skip aborts ALL
-  in-flight posts (recorded as 'skipped by user').
-• /progress and /status now show a "Parallel workers" section.
+1) /stats v2 — per userbot: connection state, name/@username/id, then a full
+   membership matrix: ✅ member / ❌ NOT a member / 👑 admin for EVERY target
+   channel and every DB + DB2 channel, plus the CONTROL BOT's own DB/DB2
+   rights. A ❌ on a target is exactly why a resume silently does nothing —
+   join it with /invite.
 
-2) MULTI-BYPASS POOL + DOMAIN-SPECIFIC ROUTING WIZARD
---------------------------------------------------------------------------------
-• /bypass now manages pool slot #1; the legacy bypass_id auto-migrates into
-  the pool on first run. /altbypass stays the LAST-RESORT fallback.
-• NEW COMMANDS: /addbypass · /removebypass <n> · /bypasslist ·
-  /domainbypass (wizard, or /domainbypass <domain> <@bot>) · /deldomain <n>.
-• ROUTING (flow.py step 4): a short link whose domain matches a /domainbypass
-  rule goes ONLY to that bot (e.g. babylinks.in -> @BypassBot_A, aerolinks.*
-  -> @BypassBot_B). Any other link tries every pool bot in order, then
-  /altbypass.
+2) /removeavoid N — N is the entry number in the /avoidtext list (per-target
+   avoids numbered top to bottom). Bare /removeavoid shows the numbered list.
 
-3) BYPASS FAILURE RETRY + ADMIN ALERT
---------------------------------------------------------------------------------
-• Each bypass endpoint gets 2 attempts (initial + 1 retry).
-• A 2nd failure (or an invalid reply) fires an INSTANT ⚠️ Bypass Failure
-  Alert via the control bot to ADMIN_USER_ID + every /addadmin admin
-  (userbot-DM fallback), formatted as:
-      ⚠️ **Bypass Failure Alert**
-      • **Failed Link:** <short_link>
-      • **Bypass Bot:** @<bypass_bot>
-      • **Userbot Used:** <userbot session name>
-      • **Target Channel:** <target_channel_id>
-      • **Post Msg ID:** <msg_id>
-• If the WHOLE chain still fails, the owner also gets the old tappable
-  post-link DM, and the post is recorded in /progress and skipped — the loop
-  never crashes or gets stuck.
+3) /replaceword always wins over /avoid and /avoidtext — replacement rules
+   run BEFORE any strip in the DB2 mirror pipeline (order verified in code).
 
---------------------------------------------------------------------------------
-TESTING (sandbox mocks, no live Telegram): py_compile PASS on all changed
-files. Behavior tests (with config/db/botapi/telethon stubbed) cover:
-domain extraction + wildcard/suffix matching; the bypass chain (domain rule
-uses ONLY its bot; unruled links walk every pool bot in order then alt;
-2-attempt retry + instant alert; whole-chain failure -> old admin DM); the
-pool migration + add/remove; the per-DB delivery bundle ordering (cover
-first, then media, no interleave); the /domainbypass 2-step wizard and
-/addbypass wizard accept and persist through stubbed state; and the parallel
-dispatcher (2 posts on 2 accounts concurrently, contiguous-watermark
-progress, flood-park leaves the post for retry).
-NOTE: not run against live Telegram here — the parallel delivery ordering and
-the bypass routing are the two things to watch in the first real run's logs.
-================================================================================
-
-================================================================================
-README_PATCH — v39.2: foreign-account media fix + board edit-in-place fix
-================================================================================
-
-DRAG onto the repo root: bot.py, forwarder.py, richboard.py, botapi.py,
-README_PATCH.txt (everything else unchanged from v39.1).
-
-1) SKIPPED-POSTS BUG (the big one): in the parallel dispatcher, acc1 READ all
-   messages and handed them to whichever account was free — but a media
-   object's access_hash/file_reference is ACCOUNT-BOUND. acc2 re-sending
-   acc1's cover photo got MediaEmptyError, forwarder didn't refetch on that
-   error type, the post was marked resolved, and the watermark skipped it
-   FOREVER (posts 39/41). Fix: (a) every worker REFETCHES its post with its
-   own client before processing; (b) forwarder now treats MediaEmptyError as
-   a stale-reference error (refetch + retry) like the others.
-   RECOVERY for already-skipped posts: /goto <n> <link or id of the last good
-   post> then resume — e.g. /goto 6 https://t.me/c/4309048595/38.
-
-2) BOARD REFRESH/TOGGLE: the board's in-place edit used an in-memory message
-   id map that dies on every Render restart -> Refresh sent a NEW board each
-   time. Fix: the tapped message's own id rides inside the button callback
-   and is now used for the edit — Refresh and the ▶️ Resume N / ⏸ Pause N
-   flip edit the SAME message, even after restarts. (Board buttons still
-   expire after 150s of inactivity — /targets opens a fresh board.)
-
-TESTING: py_compile PASS on all 4 changed files. The MediaEmptyError refetch
-path and the callback-msg-id edit path mirror code already proven in v38/v39.
+TESTING: py_compile PASS on botapi.py; role-check and numbering logic match
+patterns already proven in v38–v40.
 ================================================================================

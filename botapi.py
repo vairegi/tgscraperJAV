@@ -807,22 +807,30 @@ def register(scrape_client, sm=None):
         else:
             await ev.reply("ℹ️ That string is already on the avoid list.")
 
-    @bot.on(events.NewMessage(pattern=r"^/removeavoid(?:\s+(\d+)\s+(\d+))?$"))
+    @bot.on(events.NewMessage(pattern=r"^/removeavoid(?:\s+(\d+))?$"))
     async def removeavoid_cmd(ev):
+        """v41: /removeavoid N — N is the entry number in the /avoidtext list
+        (per-target avoids numbered top to bottom). Removes that exact string."""
         if not await _admin(ev.sender_id):
             return
-        n, idx = ev.pattern_match.group(1), ev.pattern_match.group(2)
+        arg = (ev.pattern_match.group(1) or "").strip()
         targets = await DB.get_targets()
-        if not n or not idx or not (1 <= int(n) <= len(targets)):
-            await ev.reply("Usage: /removeavoid <target #> <string #> — numbers from /avoidtext.")
+        # build the same numbered list /avoidtext shows: per-target avoids in order
+        flat = []  # [(target_id, string_index_1based, text)]
+        for t in targets:
+            for si, s in enumerate(await DB.get_avoids(t["id"])):
+                flat.append((t["id"], si + 1, s))
+        if not arg.isdigit() or not (1 <= int(arg) <= len(flat)):
+            listing = "\n".join(f"  {i+1}. {tid} » \"{s}\"" for i, (tid, _, s) in enumerate(flat)) or "  (none)"
+            await ev.reply(f"Usage: /removeavoid <#> — the number from this list:\n{listing}")
             return
-        t = targets[int(n) - 1]
-        res = await DB.remove_avoid(t["id"], int(idx))
+        tid, si, _ = flat[int(arg) - 1]
+        res = await DB.remove_avoid(tid, si)
         if res is None:
-            await ev.reply("⚠️ No such string number — see /avoidtext.")
+            await ev.reply("⚠️ That string is already gone — /avoidtext to see the current list.")
         else:
             _, removed = res
-            await ev.reply(f"🗑 Target {n}: stopped stripping \"{removed}\".")
+            await ev.reply(f"🗑 Removed avoid #{arg}: \"{removed}\" (target {tid}).")
 
     # ---------- /checkdm: userbot DM pipeline (@richmining -> auto admin) ----------
     @bot.on(events.NewMessage(pattern=r"^/checkdm(?:\s+(\S+))?$"))
@@ -952,28 +960,84 @@ def register(scrape_client, sm=None):
     # ---------- v40: /stats, /invite, /leave, /avoid, /replaceword ----------
     @bot.on(events.NewMessage(pattern=r"^/stats$"))
     async def stats_cmd(ev):
-        """Each connected userbot: acc number + profile + alive check."""
+        """v41: per-userbot connection + profile + MEMBERSHIP matrix — which
+        account is in which target channel, and its role in each DB / DB2 —
+        plus the control bot's own DB/DB2 rights. A '❌ target' row is
+        exactly why a resume silently does nothing — join it with /invite."""
         if not await _admin(ev.sender_id):
             return
         mgr = _sm[0]
         if mgr is None:
             await ev.reply("Session manager unavailable.")
             return
-        lines = [f"👥 USERBOTS — {mgr.count()} account(s) loaded"]
+        targets = await DB.get_targets()
+
+        async def _role(client, cid):
+            """(emoji, label) for the client's membership in chat cid."""
+            try:
+                ent = await client.get_entity(cid)
+            except Exception:
+                return "\u274C", "no access"
+            try:
+                p = await client.get_permissions(ent, "me")
+                if getattr(p, "is_admin", False) or getattr(p, "is_creator", False):
+                    return "\U0001F451", "admin"
+                return "\u2705", "member"
+            except Exception:
+                try:
+                    await client.get_messages(ent, limit=1)
+                    return "\u2705", "member"
+                except Exception:
+                    return "\u274C", "NOT a member"
+
+        status = await ev.reply("⏳ Building /stats — checking every account against every channel…")
+        out = []
+        # ---- control bot: DB / DB2 rights (it posts the DB2 clean mirror) ----
+        me_b = await bot.get_me()
+        out.append(f"🤖 CONTROL BOT @{me_b.username}")
+        seen = set()
+        for t in targets:
+            for lbl, cid in (("DB", t.get("db_id")), ("DB2", t.get("db2_id"))):
+                if not cid or cid in seen:
+                    continue
+                seen.add(cid)
+                em, role = await _role(bot, cid)
+                title = await _chat_title(scrape_client, cid) or str(cid)
+                out.append(f"  {em} {lbl} {title} — {role}")
+        # ---- each userbot: profile + target membership + DB/DB2 role ----
         for i, c in enumerate(mgr.all()):
             name = f"acc{i + 1}/{mgr.count()}"
             try:
                 if not c.is_connected():
-                    lines.append(f"  {name}: ⚪ NOT CONNECTED")
+                    out.append("")
+                    out.append(f"👤 {name}: ⚪ NOT CONNECTED")
                     continue
                 me = await c.get_me()
                 uname = f"@{me.username}" if getattr(me, "username", None) else "(no username)"
-                fname = (getattr(me, "first_name", "") or "") + " " + (getattr(me, "last_name", "") or "")
-                lines.append(f"  {name}: 🟢 {fname.strip() or '?'} {uname} · id `{me.id}`")
+                fname = ((getattr(me, "first_name", "") or "") + " " + (getattr(me, "last_name", "") or "")).strip()
+                out.append("")
+                out.append(f"👤 {name}: {fname or '?'} {uname} · id `{me.id}`")
             except Exception as e:
-                lines.append(f"  {name}: 🔴 error — {type(e).__name__}")
-        lines.append("\nParallel scraping fans pending posts across every 🟢 account.")
-        await ev.reply("\n".join(lines))
+                out.append("")
+                out.append(f"👤 {name}: 🔴 error — {type(e).__name__}")
+                continue
+            for j, t in enumerate(targets):
+                em, role = await _role(c, t["id"])
+                ttl = await _chat_title(c, t["id"]) or str(t["id"])
+                out.append(f"  {em} target {j + 1} · {ttl} — {role}")
+                for lbl, cid in (("DB", t.get("db_id")), ("DB2", t.get("db2_id"))):
+                    if not cid:
+                        continue
+                    em2, role2 = await _role(c, cid)
+                    ttl2 = await _chat_title(c, cid) or str(cid)
+                    out.append(f"      {em2} {lbl} {ttl2} — {role2}")
+        out.append("")
+        out.append("❌ on a target = join it with /invite · not admin in a DB = add rights there.")
+        text = "\n".join(out)
+        try:
+            await status.edit(text)
+        except Exception:
+            await ev.reply(text)
 
     def _parse_invite(ev):
         """'/invite 2 <link>' -> (2, link); '/invite <link>' -> (None, link).
