@@ -1,4 +1,31 @@
 ================================================================================
+README_PATCH — v39.1: resume-visibility logging + /checkram + addadmin gate fix
+================================================================================
+
+DRAG onto the repo root: bot.py, botapi.py, README.md, README_PATCH.txt
+(everything else unchanged from v39.)
+
+1) RESUME-VISIBILITY (bot.py): the parallel dispatcher now LOGS what it sees —
+   a membership pre-check ('account 1 cannot READ target … every userbot must
+   be a MEMBER'), a 'caught up — no new posts' line when a resumed target has
+   nothing to scrape, and a per-wave 'parallel wave: posts [..] -> accounts [..]'
+   line. Worker failures now include the exception type + a join-channel hint.
+   Root cause of 'resumed but silent' is now visible in the Render log instead
+   of guessing.
+
+2) /checkram (botapi.py): shows the process RSS and the container's cgroup RAM
+   usage/limit — watch Render's 512 MB free-tier cap without opening the
+   dashboard. Added to the command menu and /help (INFO section).
+
+3) /addadmin + /removeadmin: re-applies the _owner -> _admin gate fix if the
+   repo still had the old gate (any existing admin can manage admins; no more
+   silent no-reply when messaging from a second account).
+
+TESTING: py_compile PASS on bot.py + botapi.py. /checkram reads /proc/self/
+status + /sys/fs/cgroup (no new dependency — requirements.txt untouched).
+================================================================================
+
+================================================================================
 README_PATCH — v39: parallel multi-userbot scraping + multi-bypass routing
 ================================================================================
 

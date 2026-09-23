@@ -28,6 +28,7 @@ bot = None  # created lazily inside start() (Py3.14 has no loop at import time)
 _CMDS = [
     ("help",     "Show all commands"),
     ("ping",     "Check the bot is alive"),
+    ("checkram", "Show RAM usage (process + container, Render 512MB cap)"),
     ("target",   "Add target channel + its DB channel (wizard)"),
     ("targets",  "Live charge-sheet board (table + buttons) — plain list: /targets_text"),
     ("targets_text", "Plain markdown targets list (fallback)"),
@@ -337,7 +338,7 @@ def register(scrape_client):
         def L(name):
             return f"/{name} — {d.get(name, '')}"
         sections = [
-            ("ℹ️ INFO", ["help", "ping"]),
+            ("ℹ️ INFO", ["help", "ping", "checkram"]),
             ("👑 ADMINS", ["addadmin", "removeadmin"]),
             ("🎯 SETUP (targets · DB · bypass)",
              ["target", "targets", "deltarget", "setdb", "adddb", "bypass",
@@ -375,6 +376,48 @@ def register(scrape_client):
                      "When LINK_BOT renames its button: /linkbutton <new text> — "
                      "active instantly, no restart. "
                      "Caught-up channels re-scan for new posts every 30s.")
+        await ev.reply("\n".join(lines))
+
+    # ---------- v39.1: /checkram — RAM usage ----------
+    @bot.on(events.NewMessage(pattern=r"^/checkram$"))
+    async def checkram_cmd(ev):
+        """Process + container RAM, so you can watch Render's 512MB free cap."""
+        if not await _admin(ev.sender_id):
+            return
+        import os as _os
+        rss_mb = None
+        try:
+            with open("/proc/self/status") as f:
+                for ln in f:
+                    if ln.startswith("VmRSS:"):
+                        rss_mb = int(ln.split()[1]) / 1024.0
+                        break
+        except Exception:
+            pass
+        used_mb = limit_mb = None
+        try:
+            if _os.path.exists("/sys/fs/cgroup/memory.current"):           # cgroup v2
+                with open("/sys/fs/cgroup/memory.current") as f:
+                    used_mb = int(f.read()) / (1024 * 1024)
+                with open("/sys/fs/cgroup/memory.max") as f:
+                    raw = f.read().strip()
+                limit_mb = None if raw == "max" else int(raw) / (1024 * 1024)
+            elif _os.path.exists("/sys/fs/cgroup/memory/memory.usage_in_bytes"):  # cgroup v1
+                with open("/sys/fs/cgroup/memory/memory.usage_in_bytes") as f:
+                    used_mb = int(f.read()) / (1024 * 1024)
+                with open("/sys/fs/cgroup/memory/memory.limit_in_bytes") as f:
+                    limit_mb = int(f.read()) / (1024 * 1024)
+        except Exception:
+            pass
+        lines = ["\U0001F9E0 **RAM usage**"]
+        if rss_mb is not None:
+            lines.append(f"• This process (userbot + control bot): **{rss_mb:.0f} MB**")
+        if used_mb is not None:
+            if limit_mb and limit_mb < 1000000:   # absurd = host value, not the container cap
+                lines.append(f"• Container: **{used_mb:.0f} / {limit_mb:.0f} MB** ({used_mb / limit_mb * 100:.0f}%)")
+            else:
+                lines.append(f"• Container: **{used_mb:.0f} MB** used")
+        lines.append("• Render free tier kills the dyno at **512 MB** — keep it under ~480 MB")
         await ev.reply("\n".join(lines))
 
     @bot.on(events.NewMessage(pattern=r"^/ping$"))

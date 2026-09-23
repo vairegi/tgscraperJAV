@@ -116,7 +116,9 @@ async def _parallel_one(client, cfg, msg, idx, name, resolved):
         log.warning("FloodWait %ds on %s — account parked; post %s retried next pass",
                     e.seconds, name, msg.id)
     except Exception as e:
-        log.exception("post %s failed", msg.id)
+        log.exception("post %s failed (%s: %s) — if 'ChannelPrivate'/'not a member', "
+                      "that userbot account must JOIN the target channel first",
+                      msg.id, type(e).__name__, e)
         await DB.add_failure(msg.id, state.workers.get(name, "?"), e)
         resolved.add(msg.id)
     finally:
@@ -140,6 +142,16 @@ async def _parallel_pass(sm, target, cfg, last_id, pass_gen):
     reader = sm.all()[0]
     collected = []  # [(msg_id, is_post, msg)] ascending — for the watermark walk
     pending = []
+    # v39.1: fail LOUDLY when the reader account can't access the channel —
+    # before this, a non-member account just made the pass die in the generic
+    # 'scrape loop error' handler with no hint about the real cause
+    try:
+        await reader.get_messages(target, limit=1)
+    except Exception as e:
+        log.error("parallel: account 1 cannot READ target %s — %s: %s. "
+                  "Every userbot must be a MEMBER of the target channel. Skipping pass.",
+                  target, type(e).__name__, e)
+        return
     async for msg in reader.iter_messages(target, min_id=last_id, reverse=True):
         if state.abort:
             state.abort = False
@@ -155,6 +167,11 @@ async def _parallel_pass(sm, target, cfg, last_id, pass_gen):
         if len(collected) >= 500 or len(pending) >= 200:
             break  # bound one pass; the next pass continues from the watermark
     if not pending:
+        # v39.1: SAY it when a resumed target simply has nothing new — the
+        # #1 'resumed but nothing happened' mystery is a channel whose resume
+        # point is already at the newest message (nothing to scrape)
+        log.info("parallel: target %s caught up — scanned %d msg(s) from id %s, no new posts",
+                 target, len(collected), last_id)
         return
     log.info("parallel: %d pending post(s) on target %s across %d account(s)",
              len(pending), target, sm.count())
@@ -181,6 +198,9 @@ async def _parallel_pass(sm, target, cfg, last_id, pass_gen):
             await asyncio.sleep(wait)
             continue
         batch = pending[i:i + len(free)]
+        # v39.1: log every wave so the Render log shows parallel activity
+        log.info("parallel wave: posts %s -> accounts %s",
+                 [m.id for m in batch], [f"acc{idx + 1}" for idx in free[:len(batch)]])
         tasks = []
         for k, msg in enumerate(batch):
             idx = free[k]
