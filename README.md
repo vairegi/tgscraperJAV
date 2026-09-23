@@ -47,7 +47,12 @@ Each target's LINK_BOT is discovered per-post from the Download button's own `t.
 | `/status` `/current` | live stage & current post |
 | `/progress` | posts done, **last scraped post**, resume point, media sent, failures + reasons |
 | `/ping` | check the bot is alive (works in control bot AND userbot) |
-| `/checkram` | **v39.1** show RAM usage — process MB + container used/limit (Render 512 MB cap) |
+| `/checkram` |
+| `/stats` | **v40** list every connected userbot: acc number + name + @username + id |
+| `/invite [n] <link>` | **v40** userbot n (or ALL if no n) joins a channel (public @name or private t.me/+ link); each confirms the channel it joined |
+| `/leave [n] <id|link>` | **v40** userbot n (or ALL) leaves a channel |
+| `/avoid "txt"` | **v40** GLOBAL DB2 strip — removed from every target's DB2 caption (per-target /avoidtext still works on top) |
+| `/replaceword "old" "new"` | **v40** GLOBAL DB2 replace — rewrites text in every DB2 caption before the avoid strip (empty "new" deletes) | **v39.1** show RAM usage — process MB + container used/limit (Render 512 MB cap) |
 | `/skip` `/stop` | skip current post / stop |
 | `/replace <ch> "old" "new"` | userbot edits every post containing `old` in that channel, replacing all occurrences |
 | `/replace "old" "new"` | BOT edits every DB2-mirror post containing `old` (2-arg form) |

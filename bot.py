@@ -437,7 +437,7 @@ async def main():
     ]
     tasks += [asyncio.ensure_future(c.run_until_disconnected()) for c in sm.all()]
     if BOT_TOKEN:
-        ctl = await guarded(lambda: botapi.start(client), "control bot login")
+        ctl = await guarded(lambda: botapi.start(client, sm), "control bot login")  # v40: sm for /stats /invite /leave
         me_b = await ctl.get_me()
         log.info("control bot @%s online (command menu registered)", me_b.username)
         tasks.append(asyncio.ensure_future(ctl.run_until_disconnected()))

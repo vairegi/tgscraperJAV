@@ -26,8 +26,10 @@ from telethon.tl.types import Channel, Chat, User
 bot = None  # created lazily inside start() (Py3.14 has no loop at import time)
 
 _CMDS = [
+    # v40: regrouped for the tappable menu — related commands sit together
     ("help",     "Show all commands"),
     ("ping",     "Check the bot is alive"),
+    ("stats",    "Connected userbots (acc# + profile)"),
     ("checkram", "Show RAM usage (process + container, Render 512MB cap)"),
     ("target",   "Add target channel + its DB channel (wizard)"),
     ("targets",  "Live charge-sheet board (table + buttons) — plain list: /targets_text"),
@@ -72,9 +74,16 @@ _CMDS = [
     ("avoidtext","DB2: strip a credit string: /avoidtext <n> \"multi word text\" (bare = list)"),
     ("removeavoid", "Remove an avoid string: /removeavoid <n> <#>"),
     ("checkdm",   "Auto admin pipeline: /checkdm on|off (userbot watches @richmining DMs)"),
+    ("invite",   "Userbot joins a channel: /invite [n] <link> (no n = ALL)"),
+    ("leave",    "Userbot leaves a channel: /leave [n] <channel id|link>"),
+    ("avoid",    "DB2 GLOBAL strip text: /avoid \"txt\" (bare = list)"),
+    ("removegavoid", "Remove a global avoid: /removegavoid <#>"),
+    ("replaceword",  "DB2 GLOBAL replace: /replaceword \"old\" \"new\" (bare = list)"),
+    ("removereplace", "Remove a replace rule: /removereplace <#>"),
 ]
 
 _pending = {}  # user_id -> (kind, extra)
+_sm = [None]   # v40: SessionManager, set by register()
 log_mirror = logging.getLogger("db2mirror")
 
 # v39: validate a bypass endpoint (GROUP id or BOT @username) via the
@@ -328,7 +337,9 @@ async def _add_target_with_db(scrape_client, ev, tid, dbid, db2=None):
                    + "\n\n/targets to view all, /start to scrape.")
 
 
-def register(scrape_client):
+def register(scrape_client, sm=None):
+    # v40: sm = the SessionManager (gives /stats, /invite, /leave every account).
+    _sm[0] = sm
     # ---------- info ----------
     @bot.on(events.NewMessage(pattern=r"^/help$"))
     async def help_cmd(ev):
@@ -338,23 +349,24 @@ def register(scrape_client):
         def L(name):
             return f"/{name} — {d.get(name, '')}"
         sections = [
-            ("ℹ️ INFO", ["help", "ping", "checkram"]),
+            # v40: regrouped — mirror the order things are used in
+            ("ℹ️ INFO", ["help", "ping", "checkram", "stats"]),
             ("👑 ADMINS", ["addadmin", "removeadmin"]),
-            ("🎯 SETUP (targets · DB · bypass)",
-             ["target", "targets", "deltarget", "setdb", "adddb", "bypass",
-              "addbypass", "removebypass", "bypasslist", "domainbypass",
-              "deldomain", "altbypass"]),
-            ("🧼 DB2 CLEAN MIRROR (bot)", ["setdb2", "avoidtext", "removeavoid"]),
-            ("🔗 CHECKDM PIPELINE (userbot)", ["checkdm"]),
+            ("🎯 TARGETS & DB", ["target", "targets", "targets_text", "deltarget",
+                                       "setdb", "adddb", "setdb2"]),
+            ("🔐 BYPASS", ["bypass", "addbypass", "removebypass", "bypasslist",
+                                 "domainbypass", "deldomain", "altbypass"]),
+            ("🧼 DB2 TEXT CLEANING", ["avoid", "removegavoid", "replaceword",
+                                           "removereplace", "avoidtext", "removeavoid"]),
+            ("👥 USERBOTS", ["invite", "leave", "add", "checkdm"]),
             ("🔘 LINK-BOT BUTTONS", ["linkbutton", "removelinkbutton"]),
             ("▶️ SCRAPING", ["start", "pause", "resume", "stop", "skip", "cancel"]),
             ("📊 MONITOR", ["status", "current", "progress", "lastpost"]),
             ("🧭 PROGRESS CONTROL", ["goto", "reset"]),
-            ("✏️ BULK TEXT EDIT (userbot)", ["replace", "deletetext"]),
-            ("🧹 MASS DELETE (userbot)", ["massdlt", "massdlt_status", "massdlt_stop"]),
-            ("📨 FORWARD / COPY (userbot)",
+            ("✏️ BULK TEXT EDIT", ["replace", "deletetext"]),
+            ("🧹 MASS DELETE", ["massdlt", "massdlt_status", "massdlt_stop"]),
+            ("📨 FORWARD / COPY",
              ["forward", "forward_status", "forward_stop", "forward_resume"]),
-            ("🤖 ADD BOTS (userbot)", ["add"]),
         ]
         lines = ["📖 COMMANDS"]
         shown = set()
@@ -611,7 +623,13 @@ def register(scrape_client):
     async def _copy_to_db2(m, db2, avoids):
         """Copy ONE DB message into DB2 as a fresh bot post (no forward tag),
         caption cleaned. FloodWait is slept through in place."""
-        cap = _clean_caption(m.message or "", avoids)
+        # v40: GLOBAL DB2 rules — /replaceword rewrites first, then _clean_caption
+        # strips global /avoid strings AND the per-target /avoidtext ones.
+        _txt = m.message or ""
+        for _p in await DB.get_replace_words():
+            if _p.get("old"):
+                _txt = _txt.replace(_p["old"], _p.get("new", ""))
+        cap = _clean_caption(_txt, (await DB.get_global_avoids()) + list(avoids))
         spoiler = bool(getattr(getattr(m, "media", None), "spoiler", False))
         for _ in range(3):
             try:
@@ -930,6 +948,193 @@ def register(scrape_client):
         buttons, removed = r
         await ev.reply(f"🗑 Removed label {n}: {removed}\n"
                        f"{len(buttons)} custom label(s) left (built-in '{BTN_SHORT_LINK}' is always active).")
+
+    # ---------- v40: /stats, /invite, /leave, /avoid, /replaceword ----------
+    @bot.on(events.NewMessage(pattern=r"^/stats$"))
+    async def stats_cmd(ev):
+        """Each connected userbot: acc number + profile + alive check."""
+        if not await _admin(ev.sender_id):
+            return
+        mgr = _sm[0]
+        if mgr is None:
+            await ev.reply("Session manager unavailable.")
+            return
+        lines = [f"👥 USERBOTS — {mgr.count()} account(s) loaded"]
+        for i, c in enumerate(mgr.all()):
+            name = f"acc{i + 1}/{mgr.count()}"
+            try:
+                if not c.is_connected():
+                    lines.append(f"  {name}: ⚪ NOT CONNECTED")
+                    continue
+                me = await c.get_me()
+                uname = f"@{me.username}" if getattr(me, "username", None) else "(no username)"
+                fname = (getattr(me, "first_name", "") or "") + " " + (getattr(me, "last_name", "") or "")
+                lines.append(f"  {name}: 🟢 {fname.strip() or '?'} {uname} · id `{me.id}`")
+            except Exception as e:
+                lines.append(f"  {name}: 🔴 error — {type(e).__name__}")
+        lines.append("\nParallel scraping fans pending posts across every 🟢 account.")
+        await ev.reply("\n".join(lines))
+
+    def _parse_invite(ev):
+        """'/invite 2 <link>' -> (2, link); '/invite <link>' -> (None, link).
+        Returns (n_or_None, target_raw) or None when the args are wrong."""
+        parts = (ev.pattern_match.group(1) or "").strip().split()
+        if not parts:
+            return None
+        if len(parts) >= 2 and parts[0].isdigit():
+            return int(parts[0]), parts[1]
+        return None, parts[0]
+
+    async def _join_one(ev, idx, raw):
+        mgr = _sm[0]
+        c = mgr.all()[idx]
+        name = f"acc{idx + 1}/{mgr.count()}"
+        from telethon.tl.functions.messages import ImportChatInviteRequest
+        from telethon.tl.functions.channels import JoinChannelRequest
+        raw = raw.strip()
+        try:
+            m = re.search(r"(?:t\.me/)?(?:\+|joinchat/)([A-Za-z0-9_\-]+)$", raw)
+            if m:                                   # private invite link
+                await c(ImportChatInviteRequest(m.group(1)))
+                ent = None
+            else:                                   # @username / t.me/name / id
+                ent = await c.get_entity(_parse_chat_id(raw))
+                await c(JoinChannelRequest(ent))
+            if ent is None:                         # resolve title after a hash join
+                try:
+                    d = await c.get_dialogs(limit=1)
+                    ent = d[0].entity if d else None
+                except Exception:
+                    ent = None
+            title = getattr(ent, "title", None) or raw
+            me = await c.get_me()
+            tag = f"@{me.username}" if getattr(me, "username", None) else str(me.id)
+            await ev.reply(f"✅ {name} ({tag}) joined **{title}**")
+        except Exception as e:
+            msg = str(e)
+            if "USER_ALREADY_PARTICIPANT" in msg:
+                await ev.reply(f"ℹ️ {name} is already a member of {raw}")
+            else:
+                await ev.reply(f"⚠️ {name} failed to join {raw}: {type(e).__name__} {msg[:150]}")
+
+    @bot.on(events.NewMessage(pattern=r"^/invite(?:\s+([\s\S]+))?$"))
+    async def invite_cmd(ev):
+        if not await _admin(ev.sender_id):
+            return
+        mgr = _sm[0]
+        parsed = _parse_invite(ev)
+        if mgr is None or not parsed:
+            await ev.reply("Usage: /invite [account#] <channel link or @username>\n"
+                           "• /invite 2 https://t.me/+abc… — only userbot 2 joins\n"
+                           "• /invite @somechannel — EVERY userbot joins")
+            return
+        n, raw = parsed
+        if n is not None and not (1 <= n <= mgr.count()):
+            await ev.reply(f"⚠️ No account #{n} — {mgr.count()} loaded. /stats to see them.")
+            return
+        idxs = [n - 1] if n is not None else list(range(mgr.count()))
+        for idx in idxs:
+            await _join_one(ev, idx, raw)
+            await asyncio.sleep(3)          # paced — Telegram-safe
+
+    @bot.on(events.NewMessage(pattern=r"^/leave(?:\s+([\s\S]+))?$"))
+    async def leave_cmd(ev):
+        if not await _admin(ev.sender_id):
+            return
+        mgr = _sm[0]
+        parsed = _parse_invite(ev)
+        if mgr is None or not parsed:
+            await ev.reply("Usage: /leave [account#] <channel id or link>\n"
+                           "• /leave 1 -1001234567890 — only userbot 1 leaves\n"
+                           "• /leave -1001234567890 — EVERY userbot leaves")
+            return
+        n, raw = parsed
+        if n is not None and not (1 <= n <= mgr.count()):
+            await ev.reply(f"⚠️ No account #{n} — {mgr.count()} loaded.")
+            return
+        from telethon.tl.functions.channels import LeaveChannelRequest
+        idxs = [n - 1] if n is not None else list(range(mgr.count()))
+        for idx in idxs:
+            c = mgr.all()[idx]
+            name = f"acc{idx + 1}/{mgr.count()}"
+            try:
+                ent = await c.get_entity(_parse_chat_id(raw))
+                title = getattr(ent, "title", None) or raw
+                await c(LeaveChannelRequest(ent))
+                await ev.reply(f"🚪 {name} left **{title}**")
+            except Exception as e:
+                await ev.reply(f"⚠️ {name} couldn't leave {raw}: {type(e).__name__} {str(e)[:150]}")
+            await asyncio.sleep(2)
+
+    @bot.on(events.NewMessage(pattern=r"^/avoid(?:\s+([\s\S]+))?$"))
+    async def avoid_cmd(ev):
+        """v40: GLOBAL DB2 strip — applies to every target's DB2 mirror."""
+        if not await _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip().strip('"').strip()
+        if not arg:
+            av = await DB.get_global_avoids()
+            listing = "\n".join(f"  {i+1}. `{t}`" for i, t in enumerate(av)) or "  (none)"
+            await ev.reply(f"🧼 GLOBAL avoid strings (stripped from ALL DB2 captions):\n{listing}\n\n"
+                           "Add: /avoid \"text to strip\" · Remove: /removegavoid <#>\n"
+                           "Per-target strips still work via /avoidtext.")
+            return
+        av, added = await DB.add_global_avoid(arg)
+        await ev.reply((f"✅ Global avoid added — `{arg}` is now stripped from every DB2 caption. "
+                        f"({len(av)} global rule(s))") if added else
+                       f"ℹ️ `{arg}` is already a global avoid.")
+
+    @bot.on(events.NewMessage(pattern=r"^/removegavoid(?:\s+(\d+))?$"))
+    async def removegavoid_cmd(ev):
+        if not await _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        res = await DB.remove_global_avoid(int(arg)) if arg.isdigit() else None
+        if res is None:
+            await ev.reply("Usage: /removegavoid <#> — bare /avoid lists them with numbers.")
+            return
+        av, removed = res
+        await ev.reply(f"🗑 Removed global avoid `{removed}` — {len(av)} left.")
+
+    @bot.on(events.NewMessage(pattern=r"^/replaceword(?:\s+([\s\S]+))?$"))
+    async def replaceword_cmd(ev):
+        """v40: GLOBAL DB2 word/phrase replace — runs BEFORE the avoid strip."""
+        if not await _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        if not arg:
+            pairs = await DB.get_replace_words()
+            listing = "\n".join(f"  {i+1}. `{p['old']}` → `{p['new']}`"
+                                for i, p in enumerate(pairs)) or "  (none)"
+            await ev.reply(f"🔁 GLOBAL replace rules (applied to ALL DB2 captions):\n{listing}\n\n"
+                           "Add: /replaceword \"old text\" \"new text\" · Remove: /removereplace <#>")
+            return
+        try:
+            parts = [p for p in shlex.split(arg)]
+        except ValueError:
+            parts = []
+        if len(parts) != 2:
+            await ev.reply("Usage: /replaceword \"old text\" \"new text\" — quote both. "
+                           "Use \"\" as the new text to delete the word instead.")
+            return
+        old_w, new_w = parts
+        pairs = await DB.add_replace_word(old_w, new_w)
+        await ev.reply(f"✅ Global replace saved: `{old_w}` → `{new_w or '(deleted)'}` "
+                       f"— applied to every DB2 caption before the avoid strip. "
+                       f"({len(pairs)} rule(s))")
+
+    @bot.on(events.NewMessage(pattern=r"^/removereplace(?:\s+(\d+))?$"))
+    async def removereplace_cmd(ev):
+        if not await _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        res = await DB.remove_replace_word(int(arg)) if arg.isdigit() else None
+        if res is None:
+            await ev.reply("Usage: /removereplace <#> — bare /replaceword lists them with numbers.")
+            return
+        pairs, removed = res
+        await ev.reply(f"🗑 Removed replace rule `{removed['old']}` → `{removed['new']}` "
+                       f"— {len(pairs)} left.")
 
     # ---------- wizards (all accept inline args too) ----------
     @bot.on(events.NewMessage(pattern=r"^/target(?:\s+(.+))?$"))
@@ -1711,10 +1916,10 @@ async def _bulk_edit(scrape_client, ev, channel, old, new):
     return asyncio.ensure_future(_worker())
 
 
-async def start(scrape_client):
+async def start(scrape_client, sm=None):
     global bot
     bot = TelegramClient(MemorySession(), API_ID, API_HASH)
     await bot.start(bot_token=BOT_TOKEN)
-    register(scrape_client)
+    register(scrape_client, sm)
     await _menu()
     return bot

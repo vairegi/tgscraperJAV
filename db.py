@@ -253,6 +253,51 @@ async def remove_bypass_domain(n):
     await set_config("bypass_domains", rules)
     return rules, removed
 
+# ---------------- v40: GLOBAL DB2 text cleaning ----------------
+# /avoid adds strings stripped from EVERY target's DB2 mirror captions;
+# /replaceword adds (old -> new) rewrites applied BEFORE the avoid-strip.
+# Both apply only to DB2 captions — DB posts are never touched. Per-target
+# /avoidtext keeps working on top of these globals.
+
+async def get_global_avoids():
+    doc = await db().config.find_one({"_id": "config"}) or {}
+    return list(doc.get("global_avoids") or [])
+
+async def add_global_avoid(text):
+    av = await get_global_avoids()
+    if text in av:
+        return av, False
+    av.append(text)
+    await set_config("global_avoids", av)
+    return av, True
+
+async def remove_global_avoid(n):
+    av = await get_global_avoids()
+    if not (1 <= n <= len(av)):
+        return None
+    removed = av.pop(n - 1)
+    await set_config("global_avoids", av)
+    return av, removed
+
+async def get_replace_words():
+    doc = await db().config.find_one({"_id": "config"}) or {}
+    return [dict(p) for p in (doc.get("replace_words") or [])]
+
+async def add_replace_word(old, new):
+    pairs = await get_replace_words()
+    pairs = [p for p in pairs if p.get("old") != old]
+    pairs.append({"old": old, "new": new})
+    await set_config("replace_words", pairs)
+    return pairs
+
+async def remove_replace_word(n):
+    pairs = await get_replace_words()
+    if not (1 <= n <= len(pairs)):
+        return None
+    removed = pairs.pop(n - 1)
+    await set_config("replace_words", pairs)
+    return pairs, removed
+
 # ---------------- progress (per target id) ----------------
 
 async def get_progress(target_id):
