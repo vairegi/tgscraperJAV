@@ -105,6 +105,19 @@ async def _parallel_one(client, cfg, msg, idx, name, resolved):
     and the next pass retries it, while the flooded account rests."""
     try:
         state.workers[name] = f"post {msg.id}: starting"
+        # v39.2: refetch the post with THIS account's client before touching it.
+        # The dispatcher's reader (acc1) fetched these message objects, and a
+        # photo/document's access_hash + file_reference are ACCOUNT-BOUND —
+        # acc2 re-sending acc1's media object gets MediaEmptyError ('media
+        # object is invalid or the current account may not be able to send
+        # it'). That's exactly how posts 39/41 died on acc2 while 38/40/42 on
+        # acc1 delivered fine. A one-call refetch gives this worker its OWN
+        # valid reference. In v38 the same account read+processed, so the bug
+        # is specific to the shared-reader parallel path.
+        fresh = await client.get_messages(cfg["target_id"], ids=msg.id)
+        if not fresh:
+            raise RuntimeError(f"post {msg.id} could not be re-read by this account")
+        msg = fresh
         await process_post(client, cfg, msg, worker_name=name)
         resolved.add(msg.id)
         log.info("post %s done (%s, parallel)", msg.id, name)

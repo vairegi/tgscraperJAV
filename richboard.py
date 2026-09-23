@@ -181,11 +181,15 @@ async def edit_targets_board(chat_id, message_id, rows):
     return await send_targets_board(chat_id, rows)
 
 
-async def refresh_board(chat_id, rows):
-    """Edit the live board in place if we know its id, else send a new one."""
-    live = _BOARDS.get(chat_id)
-    if live and live.get("msg_id"):
-        return await edit_targets_board(chat_id, live["msg_id"], rows)
+async def refresh_board(chat_id, rows, msg_id=None):
+    """Edit the board in place, else send a new one.
+    v39.2: prefer the msg_id that rides inside the button callback — the
+    in-memory _BOARDS map dies on every Render restart, and without the
+    tapped id the board was re-SENT as a new message instead of edited
+    (duplicate boards after each restart)."""
+    mid = msg_id or ((_BOARDS.get(chat_id) or {}).get("msg_id"))
+    if mid:
+        return await edit_targets_board(chat_id, mid, rows)
     return await send_targets_board(chat_id, rows)
 
 

@@ -94,3 +94,32 @@ progress, flood-park leaves the post for retry).
 NOTE: not run against live Telegram here — the parallel delivery ordering and
 the bypass routing are the two things to watch in the first real run's logs.
 ================================================================================
+
+================================================================================
+README_PATCH — v39.2: foreign-account media fix + board edit-in-place fix
+================================================================================
+
+DRAG onto the repo root: bot.py, forwarder.py, richboard.py, botapi.py,
+README_PATCH.txt (everything else unchanged from v39.1).
+
+1) SKIPPED-POSTS BUG (the big one): in the parallel dispatcher, acc1 READ all
+   messages and handed them to whichever account was free — but a media
+   object's access_hash/file_reference is ACCOUNT-BOUND. acc2 re-sending
+   acc1's cover photo got MediaEmptyError, forwarder didn't refetch on that
+   error type, the post was marked resolved, and the watermark skipped it
+   FOREVER (posts 39/41). Fix: (a) every worker REFETCHES its post with its
+   own client before processing; (b) forwarder now treats MediaEmptyError as
+   a stale-reference error (refetch + retry) like the others.
+   RECOVERY for already-skipped posts: /goto <n> <link or id of the last good
+   post> then resume — e.g. /goto 6 https://t.me/c/4309048595/38.
+
+2) BOARD REFRESH/TOGGLE: the board's in-place edit used an in-memory message
+   id map that dies on every Render restart -> Refresh sent a NEW board each
+   time. Fix: the tapped message's own id rides inside the button callback
+   and is now used for the edit — Refresh and the ▶️ Resume N / ⏸ Pause N
+   flip edit the SAME message, even after restarts. (Board buttons still
+   expire after 150s of inactivity — /targets opens a fresh board.)
+
+TESTING: py_compile PASS on all 4 changed files. The MediaEmptyError refetch
+path and the callback-msg-id edit path mirror code already proven in v38/v39.
+================================================================================

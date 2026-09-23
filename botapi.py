@@ -1312,15 +1312,21 @@ def register(scrape_client):
             await ev.answer("⛔ Admins only", alert=True)
             return
         action, n = richboard.parse_callback(ev.data.decode())
+        # v39.2: the tapped board's message id travels inside the callback
+        # query — pass it through so Refresh/toggle EDITS that exact message
+        # even after a Render restart wiped the in-memory board map (the old
+        # getattr(ev, 'message_id') is always None on a CallbackQuery).
+        _tap_mid = (getattr(getattr(ev, "query", None), "msg_id", None)
+                    or getattr(getattr(ev, "original_update", None), "msg_id", None))
         # v38: boards expire after BOARD_TTL — late taps get a popup instead
         # of acting on a stale board (saves server resources too)
-        if richboard.board_expired(ev.chat_id, getattr(ev, "message_id", None)):
+        if richboard.board_expired(ev.chat_id, _tap_mid):
             await ev.answer("This board has expired. Run /targets to open a fresh board.",
                             alert=True)
             return
         if action == "refresh":
             rows = await _build_board_rows(scrape_client)
-            await richboard.refresh_board(ev.chat_id, rows)   # edits in place
+            await richboard.refresh_board(ev.chat_id, rows, msg_id=_tap_mid)  # edits in place
             await ev.answer("🔄 Board refreshed")
             return
         if action == "toggle":
@@ -1342,7 +1348,7 @@ def register(scrape_client):
                 state.reset_gen += 1; state._last_scan = None
                 await ev.answer(f"⏸ Target {n} paused")
             rows = await _build_board_rows(scrape_client)
-            await richboard.refresh_board(ev.chat_id, rows)   # edits in place
+            await richboard.refresh_board(ev.chat_id, rows, msg_id=_tap_mid)  # edits in place — ▶️ Resume N flips to ⏸ Pause N on the SAME message
             return
         await ev.answer()
 

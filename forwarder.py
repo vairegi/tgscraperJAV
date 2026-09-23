@@ -24,7 +24,8 @@ preserved because the same server-side file reference is reused."""
 import asyncio
 import logging
 
-from telethon.errors import FileReferenceExpiredError, MediaInvalidError
+from telethon.errors import (FileReferenceExpiredError, MediaInvalidError,
+                             MediaEmptyError)  # v39.2: MediaEmptyError = unusable ref too
 
 log = logging.getLogger("forwarder")
 
@@ -112,9 +113,14 @@ async def _send_one(client, dbc, msg, source, caption=None, buttons=None):
             log.info("delivered msg %s -> DB msg %s",
                      getattr(msg, "id", "?"), getattr(r, "id", "?"))
             return
-        except (FileReferenceExpiredError, StaleRef, MediaInvalidError) as e:
-            # stale/dead reference: refetch from the source chat -> fresh
-            # file_reference -> retry with the fresh media
+        except (FileReferenceExpiredError, StaleRef, MediaInvalidError,
+                MediaEmptyError) as e:
+            # stale/dead/foreign-account reference: refetch from the source
+            # chat with THIS client -> fresh account-bound access_hash +
+            # file_reference -> retry with the fresh media. v39.2: MediaEmptyError
+            # must take this refetch path too — before, it fell into the generic
+            # retry below and re-sent the SAME unusable object 3x, permanently
+            # failing posts on any account that didn't fetch them itself.
             log.info("msg %s reference unusable (%s) — refetching",
                      getattr(msg, "id", "?"), type(e).__name__)
             last_err = e
