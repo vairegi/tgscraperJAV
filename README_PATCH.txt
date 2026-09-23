@@ -1,39 +1,69 @@
 ================================================================================
-README_PATCH — v34: /checkdm on|off — @richmining invite -> auto admin pipeline
+README_PATCH — v39: parallel multi-userbot scraping + multi-bypass routing
 ================================================================================
 
-DRAG onto the repo root: checkdm.py (NEW), bot.py, botapi.py, README_PATCH.txt
-(everything else unchanged from v33.)
+DRAG onto the repo root: bot.py, flow.py, forwarder.py, scraper.py, db.py,
+botapi.py, README.md, README_PATCH.txt (everything else unchanged from v38).
 
-NEW COMMAND: /checkdm on | /checkdm off   (bare = show current state)
+--------------------------------------------------------------------------------
+1) PARALLEL MULTI-USERBOT SCRAPING + STRICT DB DELIVERY LOCKING
+--------------------------------------------------------------------------------
+• With 2+ StringSessions, accounts no longer rotate one-after-another — they
+  scrape the CURRENT target's pending posts IN PARALLEL (acc1 -> post #1,
+  acc2 -> post #2, …). One remaining post -> any one free account handles it.
+• STRICT DELIVERY: forwarder.deliver_post_bundle() holds a per-DB-channel
+  asyncio lock for a post's WHOLE bundle — cover post FIRST, then all its
+  videos/srt/other. A second userbot's post waits in line, so posts never
+  interleave in DB. DB2 inherits the order via botapi's own per-DB lock.
+• PROGRESS SAFETY: progress only advances to the highest CONTIGUOUS resolved
+  message id, so an out-of-order finish or a flood-parked account can never
+  make the scraper skip a post. A FloodWait parks just that account (its post
+  is retried next pass) — no whole-loop restart, no crash loop.
+• One target at a time: when it's caught up, the next pass moves to the next
+  resumed target and fans its posts across all accounts the same way.
+• Single account => the ORIGINAL sequential path runs, untouched.
+• /pause lets in-flight posts finish (no new wave); /skip aborts ALL
+  in-flight posts (recorded as 'skipped by user').
+• /progress and /status now show a "Parallel workers" section.
 
-When ON, the USERBOT watches its DM with @richmining. Each channel invite
-link he sends — public (t.me/name) or private (t.me/+hash, t.me/joinchat/…) —
-triggers this pipeline:
-  1. JOIN the channel,
-  2. WAIT until @richmining promotes the userbot to admin (polled every ~5s,
-     up to 15 min),
-  3. ADD @lifesimplerbot as admin with EXACTLY the rights the userbot holds
-     there — never more (Telegram forbids it). Group-only rights are dropped
-     automatically in broadcast channels; one reduced-rights retry if the
-     full set is rejected,
-  4. LEAVE the channel,
-  5. REPLY to the link message: DONE ✅ + the invite link,
-then it's ready for the next link.
+2) MULTI-BYPASS POOL + DOMAIN-SPECIFIC ROUTING WIZARD
+--------------------------------------------------------------------------------
+• /bypass now manages pool slot #1; the legacy bypass_id auto-migrates into
+  the pool on first run. /altbypass stays the LAST-RESORT fallback.
+• NEW COMMANDS: /addbypass · /removebypass <n> · /bypasslist ·
+  /domainbypass (wizard, or /domainbypass <domain> <@bot>) · /deldomain <n>.
+• ROUTING (flow.py step 4): a short link whose domain matches a /domainbypass
+  rule goes ONLY to that bot (e.g. babylinks.in -> @BypassBot_A, aerolinks.*
+  -> @BypassBot_B). Any other link tries every pool bot in order, then
+  /altbypass.
 
-SAFETY: joins are paced, FloodWait slept through in place, up to 5 channels
-processed concurrently, each link handled once. If no admin rights arrive
-within 15 min, the userbot leaves and warns @richmining. The on/off flag is
-MongoDB-backed (survives restarts). Registered on EVERY userbot session, so
-account rotation never breaks it.
+3) BYPASS FAILURE RETRY + ADMIN ALERT
+--------------------------------------------------------------------------------
+• Each bypass endpoint gets 2 attempts (initial + 1 retry).
+• A 2nd failure (or an invalid reply) fires an INSTANT ⚠️ Bypass Failure
+  Alert via the control bot to ADMIN_USER_ID + every /addadmin admin
+  (userbot-DM fallback), formatted as:
+      ⚠️ **Bypass Failure Alert**
+      • **Failed Link:** <short_link>
+      • **Bypass Bot:** @<bypass_bot>
+      • **Userbot Used:** <userbot session name>
+      • **Target Channel:** <target_channel_id>
+      • **Post Msg ID:** <msg_id>
+• If the WHOLE chain still fails, the owner also gets the old tappable
+  post-link DM, and the post is recorded in /progress and skipped — the loop
+  never crashes or gets stuck.
 
-TESTING (sandbox mocks, no live Telegram): py_compile PASS on all files;
-behavior tests cover invite parsing (public / +hash / joinchat / no-link),
-the full job flow (join -> poll until promoted -> EditAdminRequest with
-mirrored rights -> LeaveChannelRequest -> DONE reply with the link), the
-timeout path (leaves + warns, no promotion), flag-OFF / wrong-sender /
-non-DM / no-link all ignored, and the /checkdm on|off|status command.
-NOTE: not tested against live Telegram — the first real run depends on
-@richmining actually promoting the userbot (only then can it add
-@lifesimplerbot), so watch the first one in Render logs.
+--------------------------------------------------------------------------------
+TESTING (sandbox mocks, no live Telegram): py_compile PASS on all changed
+files. Behavior tests (with config/db/botapi/telethon stubbed) cover:
+domain extraction + wildcard/suffix matching; the bypass chain (domain rule
+uses ONLY its bot; unruled links walk every pool bot in order then alt;
+2-attempt retry + instant alert; whole-chain failure -> old admin DM); the
+pool migration + add/remove; the per-DB delivery bundle ordering (cover
+first, then media, no interleave); the /domainbypass 2-step wizard and
+/addbypass wizard accept and persist through stubbed state; and the parallel
+dispatcher (2 posts on 2 accounts concurrently, contiguous-watermark
+progress, flood-park leaves the post for retry).
+NOTE: not run against live Telegram here — the parallel delivery ordering and
+the bypass routing are the two things to watch in the first real run's logs.
 ================================================================================

@@ -79,6 +79,10 @@ async def fmt_progress(client=None):
         f"\U0001F4AC SRT sent: {s.get('srt_sent', 0)}",
         f"\u274C Failures: {s.get('failures', 0)}",
     ]
+    if getattr(state, "workers", None):  # v39: live per-worker stages
+        lines.append("👷 Parallel workers:")
+        for w, stg in state.workers.items():
+            lines.append(f"  • {w}: {stg}")
     if tlines:
         lines.append("🎯 Targets:")
         lines.extend(tlines)
@@ -87,6 +91,113 @@ async def fmt_progress(client=None):
         for f in fails:
             lines.append(f"\u2022 post {f['post_id']} @ {f['stage']}: {f['reason']} ({_fmt_ts(f['ts'])})")
     return "\n".join(lines)
+
+
+# v39: account index -> unix ts until which that account is flood-parked
+# (its post stays unresolved and is retried next pass on a rested account).
+_FLOOD_COOLDOWNS = {}
+
+
+async def _parallel_one(client, cfg, msg, idx, name, resolved):
+    """v39: process ONE post on ONE account inside a parallel wave.
+    Completed/failed/skipped posts go into `resolved` (progress advances past
+    them). A FloodWait does NOT resolve the post — the watermark stops at it
+    and the next pass retries it, while the flooded account rests."""
+    try:
+        state.workers[name] = f"post {msg.id}: starting"
+        await process_post(client, cfg, msg, worker_name=name)
+        resolved.add(msg.id)
+        log.info("post %s done (%s, parallel)", msg.id, name)
+    except Abort:
+        await DB.add_failure(msg.id, state.workers.get(name, "?"), "skipped by user")
+        resolved.add(msg.id)
+    except FloodWaitError as e:
+        _FLOOD_COOLDOWNS[idx] = time.time() + e.seconds
+        log.warning("FloodWait %ds on %s — account parked; post %s retried next pass",
+                    e.seconds, name, msg.id)
+    except Exception as e:
+        log.exception("post %s failed", msg.id)
+        await DB.add_failure(msg.id, state.workers.get(name, "?"), e)
+        resolved.add(msg.id)
+    finally:
+        state.workers.pop(name, None)
+
+
+async def _parallel_pass(sm, target, cfg, last_id, pass_gen):
+    """v39: PARALLEL multi-userbot dispatcher for ONE target at a time.
+    All available accounts share this target's pending posts — account 1
+    takes post #1, account 2 takes post #2, etc., simultaneously (a single
+    remaining post goes to any one free account). Delivery to the DB channel
+    is serialized per DB channel by forwarder's lock, so one post's complete
+    bundle (cover FIRST, then all media) always lands before the next bundle
+    starts — posts never interleave. Progress advances only to the highest
+    CONTIGUOUS resolved message id, so an out-of-order finish or a parked
+    account can never make the watermark skip a post. When this target is
+    caught up, the next loop pass moves to the next resumed target and its
+    posts are fanned out across all accounts the same way.
+    /pause lets in-flight posts finish but dispatches no new wave; /skip
+    aborts every in-flight post (each is recorded as 'skipped by user')."""
+    reader = sm.all()[0]
+    collected = []  # [(msg_id, is_post, msg)] ascending — for the watermark walk
+    pending = []
+    async for msg in reader.iter_messages(target, min_id=last_id, reverse=True):
+        if state.abort:
+            state.abort = False
+            return
+        if state.reset_gen != pass_gen or target in state.paused_ids:
+            return
+        if not is_post(msg):
+            collected.append((msg.id, False, None))
+        else:
+            log.info("POST FOUND: msg %s — queued for a parallel worker", msg.id)
+            collected.append((msg.id, True, msg))
+            pending.append(msg)
+        if len(collected) >= 500 or len(pending) >= 200:
+            break  # bound one pass; the next pass continues from the watermark
+    if not pending:
+        return
+    log.info("parallel: %d pending post(s) on target %s across %d account(s)",
+             len(pending), target, sm.count())
+    wm = last_id
+    resolved = set()
+    i = 0
+    while i < len(pending):
+        if state.abort:
+            state.abort = False
+            break
+        if state.reset_gen != pass_gen or target in state.paused_ids:
+            break
+        while state.paused and not state.abort:
+            await asyncio.sleep(2)  # pause = finish in-flight, dispatch nothing new
+        if state.abort:
+            state.abort = False
+            break
+        now = time.time()
+        free = [idx for idx in range(sm.count())
+                if _FLOOD_COOLDOWNS.get(idx, 0) <= now]
+        if not free:
+            wait = max(5, min(_FLOOD_COOLDOWNS.values()) - now)
+            log.warning("parallel: every account flood-parked — sleeping %ds", wait)
+            await asyncio.sleep(wait)
+            continue
+        batch = pending[i:i + len(free)]
+        tasks = []
+        for k, msg in enumerate(batch):
+            idx = free[k]
+            tasks.append(asyncio.ensure_future(_parallel_one(
+                sm.all()[idx], cfg, msg, idx, f"acc{idx + 1}/{sm.count()}", resolved)))
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if state.abort:
+            state.abort = False  # /skip aborted the whole wave — already recorded
+        i += len(batch)
+        # watermark: advance over every contiguously-resolved message
+        for mid, is_p, _ in collected:
+            if mid <= wm:
+                continue
+            if is_p and mid not in resolved:
+                break
+            wm = mid
+        await DB.set_progress(target, wm)
 
 
 async def health(_):
@@ -163,6 +274,16 @@ async def scrape_loop(sm):
             log.info("scanning target %s from message id %s (oldest -> newest)", target, last_id)
             state._last_scan = (target, last_id)
         try:
+            if sm.count() > 1:
+                # v39: parallel dispatcher — all accounts share this target's
+                # pending posts. The sequential loop below is untouched and
+                # still runs exactly as before for a single account.
+                await _parallel_pass(sm, target, cfg, last_id, pass_gen)
+                if state.stage != "watching for new posts":
+                    log.info("scan pass complete (caught up to latest message); watching for new posts")
+                    state.stage = "watching for new posts"
+                await asyncio.sleep(30)  # poll for new posts
+                continue
             async for msg in client.iter_messages(target, min_id=last_id, reverse=True):
                 while state.paused and not state.abort:
                     await asyncio.sleep(2)
@@ -263,8 +384,11 @@ async def main():
     sm = SessionManager()
     client = await guarded(lambda: sm.start(), "userbot login")
     me = await client.get_me()
-    log.info("logged in as %s (%s) — %d account(s) loaded, rotating every %d posts",
-             me.first_name, me.id, sm.count(), POSTS_PER_ACCOUNT)
+    state.scrape_client = client  # v39: userbot fallback for admin alert DMs
+    log.info("logged in as %s (%s) — %d account(s) loaded (%s)",
+             me.first_name, me.id, sm.count(),
+             "PARALLEL multi-userbot scraping" if sm.count() > 1
+             else "single account")
     # NOTE: userbot command handlers are DISABLED (bot-only replies).
     # commands.register(client)  <- uncomment to re-enable Saved-Messages commands
     # v34: /checkdm pipeline — every userbot session watches @richmining's DM

@@ -105,3 +105,43 @@ def is_video_msg(m):
 def is_srt_msg(m):
     name = (getattr(getattr(m, "file", None), "name", "") or "").lower()
     return name.endswith(".srt")
+
+
+# ---------------- v39: short-link domain extraction + rule matching ----------------
+# Used by flow.py's bypass step: a captured short link's domain decides WHICH
+# bypass endpoint handles it (Mongo-backed rules from /domainbypass).
+
+_DOMAIN_RE = re.compile(r"^(?:https?://)?(?:www\.)?([A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+)")
+
+
+def extract_domain(url):
+    """Short-link URL -> bare lowercase domain ('https://www.babylinks.in/x?y'
+    -> 'babylinks.in'). None when there is no dotted host."""
+    m = _DOMAIN_RE.match((url or "").strip())
+    return m.group(1).lower() if m else None
+
+
+def norm_domain(text):
+    """Normalize a domain OR a URL to its bare domain form, so /domainbypass
+    accepts both 'babylinks.in' and a pasted link."""
+    return extract_domain(text) or (text or "").strip().lower()
+
+
+def match_domain_rule(url, rules):
+    """First matching rule's endpoint for this short-link URL, else None.
+    Rule domains are bare ('babylinks.in') or wildcard ('aerolinks.*' —
+    matches any aerolinks TLD). A rule domain equal to the link's registrable
+    tail also matches (so 'babylinks.in' matches 'go.babylinks.in')."""
+    host = extract_domain(url)
+    if not host:
+        return None
+    for r in rules or []:
+        dom = (r.get("domain") or "").lower()
+        if not dom:
+            continue
+        if dom.endswith(".*"):
+            if host == dom[:-2] or host.startswith(dom[:-1]):
+                return r.get("endpoint")
+        elif host == dom or host.endswith("." + dom):
+            return r.get("endpoint")
+    return None

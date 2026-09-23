@@ -26,8 +26,13 @@ saves it. Add all three one by one, then tap `/start`.
 | Command | Action |
 |---|---|
 | `/target <id>` | set target channel |
-| `/bypass <id-or-@bot>` | set bypass endpoint — group id OR bot @username (e.g. `@dex_fekkyeww_bot`) |
-| `/altbypass <id-or-@bot>` | fallback bypass — tried only if `/bypass` returns no link; both failing DMs the admin the post link |
+| `/bypass <id-or-@bot>` | set bypass bot **#1** (the pool's first entry) — group id OR bot @username (e.g. `@dex_fekkyeww_bot`) |
+| `/addbypass` | **v39** add another bypass bot to the pool (wizard or `/addbypass @bot`) |
+| `/removebypass <n>` | **v39** remove pool bot #n (see `/bypasslist`) |
+| `/bypasslist` | **v39** show the bypass pool + domain rules |
+| `/domainbypass` | **v39** map a short-link domain to ONE bypass bot (wizard, or `/domainbypass babylinks.in @BypassBot_A`) — those links go ONLY to that bot; `aerolinks.*` wildcards work |
+| `/deldomain <n>` | **v39** remove domain rule #n |
+| `/altbypass <id-or-@bot>` | last-resort fallback — tried after every pool bot fails; both failing DMs the admin the post link |
 
 `/targets` shows each target's DB channel as a tappable invite link (minted by the userbot, which is admin there, and cached).
 | `/linkbutton [text]` | list LINK_BOT button labels, or add one — matched immediately, **no restart** |
@@ -126,6 +131,12 @@ retried, never archived as sticker-only.
 IDs: use the numeric id (e.g. `-1001234567890`) or @username.
 The account must be a member of the target channel, bypass group (with
 post permission), and admin (post rights) in the DB channel.
+
+## Parallel multi-userbot scraping (v39)
+With 2+ sessions (`STRING_SESSION`, `STRING_SESSION2`, …) the scraper no longer rotates sequentially — it runs all available accounts **in parallel on the current target's pending posts** (account 1 → post #1, account 2 → post #2, …). A single remaining post goes to any one free account. Delivery into the DB channel is **serialized per DB channel**: one post's complete bundle (cover FIRST, then all its media) always lands before the next bundle starts, so posts never interleave (DB2 inherits the same order). Progress advances only past **contiguously finished** posts, so an out-of-order finish or a flood-parked account never makes the scraper skip a post. When a target is fully caught up the scraper moves to the next resumed target and fans its posts across all accounts the same way. A single account still uses the original sequential path. `/pause` lets in-flight posts finish; `/skip` aborts all in-flight posts.
+
+## Bypass routing (v39)
+Each captured short link's **domain** picks its bypass bot: a `/domainbypass` rule sends it ONLY to that bot, while any other link tries each pool bot (`/bypass` + `/addbypass`) in order, then `/altbypass` as the last resort. Every bot gets **2 attempts**; a 2nd failure fires an instant ⚠️ **Bypass Failure Alert** to the owner + all `/addadmin` admins (failed link, bypass bot, userbot, target channel, post msg id), and the post is skipped per the normal error policy — no crash, no stuck loop.
 
 ## Multi-session later
 `session_manager.py` already round-robins — add more StringSessions to scale.

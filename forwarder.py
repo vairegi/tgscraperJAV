@@ -31,6 +31,21 @@ log = logging.getLogger("forwarder")
 SEND_RETRIES = 3
 RETRY_DELAY = 5  # seconds between send attempts
 
+# v39: per-DB-channel delivery locks. With parallel multi-userbot scraping,
+# several workers can finish collecting at the same time — this lock
+# guarantees one post's complete bundle (cover FIRST, then ALL its media)
+# lands in the DB channel before the next post's bundle begins, so posts
+# never interleave. Keyed by DB channel id; created lazily on the running
+# event loop (Py3.14 has no loop at import time).
+_LOCKS = {}
+
+
+def delivery_lock(dbc):
+    key = str(dbc)
+    if key not in _LOCKS:
+        _LOCKS[key] = asyncio.Lock()
+    return _LOCKS[key]
+
 
 class StaleRef(Exception):
     """Raised when Telegram accepted a send but the new message has no
@@ -135,3 +150,16 @@ async def send_media(client, src, msgs, dbc):
         await _send_one(client, dbc, m, src)
         ok += 1
     log.info("delivered %d/%d message(s) to DB channel", ok, len(msgs))
+
+
+async def deliver_post_bundle(client, target, cover_msg, src, msgs, dbc):
+    """v39: ONE post's complete delivery, serialized per DB channel.
+    Holds the per-DB lock for the WHOLE bundle: cover post first, then all
+    its videos/srt/other — another userbot's post waits in line, so parallel
+    scraping can never interleave two posts in the DB channel. DB2 inherits
+    the same ordering via botapi's own per-DB mirror lock."""
+    async with delivery_lock(dbc):
+        log.info("delivering bundle for post %s -> DB %s (lock held)",
+                 getattr(cover_msg, "id", "?"), dbc)
+        await send_cover(client, target, cover_msg, dbc)
+        await send_media(client, src, msgs, dbc)

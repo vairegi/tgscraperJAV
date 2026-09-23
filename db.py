@@ -182,6 +182,77 @@ async def remove_admin(uid):
         return admins, True
     return admins, False
 
+# ---------------- v39: multi-bypass pool + domain routing ----------------
+# The pool is an ORDERED list of bypass endpoints (bot @usernames or group
+# ids). /bypass manages slot #1, /addbypass appends more, /removebypass
+# deletes one. bypass_domains maps a short-link domain (or 'name.*' wildcard)
+# to a specific endpoint — matched links go ONLY to that endpoint, everything
+# else tries every pool bot in order. The legacy bypass_id/alt_bypass_id
+# config keys stay in Mongo; the pool is built from them on first read.
+
+async def _ensure_bypass_migrated():
+    doc = await db().config.find_one({"_id": "config"}) or {}
+    pool = doc.get("bypass_pool")
+    if isinstance(pool, list):
+        return list(pool)
+    pool = []
+    if doc.get("bypass_id") is not None:
+        pool.append(doc["bypass_id"])
+    await db().config.update_one({"_id": "config"}, {"$set": {"bypass_pool": pool}}, upsert=True)
+    return pool
+
+async def get_bypass_pool():
+    """Ordered bypass endpoints. Auto-migrates legacy bypass_id on first read."""
+    return await _ensure_bypass_migrated()
+
+async def add_bypass(v):
+    """Append an endpoint to the pool (deduped). Keeps bypass_id = pool[0]
+    so old code paths and /status keep working. Returns (pool, added?)."""
+    pool = await _ensure_bypass_migrated()
+    if v in pool:
+        return pool, False
+    pool.append(v)
+    await set_config("bypass_pool", pool)
+    await set_config("bypass_id", pool[0])
+    return pool, True
+
+async def remove_bypass(n):
+    """Remove pool endpoint #n (1-based, numbering shown by /bypasslist).
+    Returns (pool, removed) or None if n is out of range."""
+    pool = await _ensure_bypass_migrated()
+    if not (1 <= n <= len(pool)):
+        return None
+    removed = pool.pop(n - 1)
+    await set_config("bypass_pool", pool)
+    await set_config("bypass_id", pool[0] if pool else None)
+    return pool, removed
+
+async def get_bypass_domains():
+    doc = await db().config.find_one({"_id": "config"}) or {}
+    return list(doc.get("bypass_domains") or [])
+
+async def add_bypass_domain(domain, endpoint):
+    """Map a short-link domain (or 'name.*' wildcard) to a specific bypass
+    endpoint. One rule per domain — re-adding the same domain re-points it.
+    Returns the full rules list."""
+    from scraper import norm_domain
+    domain = norm_domain(domain)
+    rules = await get_bypass_domains()
+    rules = [r for r in rules if r.get("domain") != domain]
+    rules.append({"domain": domain, "endpoint": endpoint})
+    await set_config("bypass_domains", rules)
+    return rules
+
+async def remove_bypass_domain(n):
+    """Remove domain rule #n (1-based, numbering shown by /bypasslist).
+    Returns (rules, removed_rule) or None if n is out of range."""
+    rules = await get_bypass_domains()
+    if not (1 <= n <= len(rules)):
+        return None
+    removed = rules.pop(n - 1)
+    await set_config("bypass_domains", rules)
+    return rules, removed
+
 # ---------------- progress (per target id) ----------------
 
 async def get_progress(target_id):

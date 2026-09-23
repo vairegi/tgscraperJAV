@@ -13,7 +13,8 @@ import asyncio, logging, re, time
 from telethon.tl.types import User
 from config import (BTN_DOWNLOAD, BTN_SHORT_LINK, BTN_OPEN_LINK, FUBUKI_BOT, MEDIA_BOT,
                     ADMIN_USER_ID, WAIT_BOT_REPLY, WAIT_BYPASS_REPLY, POLL_INTERVAL, STEP_DELAY)
-from scraper import find_button, parse_tg_start, first_url, norm, is_video_msg, is_srt_msg
+from scraper import (find_button, parse_tg_start, first_url, norm, is_video_msg, is_srt_msg,
+                     match_domain_rule)  # v39: domain-based bypass routing
 import db as DB
 import forwarder
 
@@ -34,6 +35,10 @@ class FlowState:
         self.started = False   # scraping runs ONLY after /start
         self.reset_gen = 0     # bumped by /reset and /goto -> aborts the current pass
         self.paused_ids = set()  # target ids paused via /pause <n> (synced from Mongo)
+        # v39: per-worker stages for parallel scraping — {worker_name: stage}.
+        # The legacy `stage`/`current_post` fields still track the single-account
+        # path (bot.py only sets them then), so /status keeps working either way.
+        self.workers = {}
 
 log = logging.getLogger("flow")
 
@@ -98,7 +103,18 @@ class BypassFailed(Exception):
     pass
 
 
-async def _bypass_once(client, endpoint, short_link, link_bot, msg):
+async def _stage(name, txt):
+    """v39: record a worker's stage. With a worker name (parallel mode) it
+    goes to state.workers[name] so workers don't clobber each other; without
+    one (single-account path) it updates the legacy global state.stage
+    exactly like the original code, so /status behaves as before."""
+    if name:
+        state.workers[name] = txt
+    else:
+        state.stage = txt
+
+
+async def _bypass_once(client, endpoint, short_link, link_bot, msg, worker_name=None):
     """Send short_link to ONE bypass endpoint and follow the result.
     - BOT endpoint (e.g. @dex_fekkyeww_bot): replies in DM with a formatted
       message — the bypassed link is the t.me/?start=... URL in its text.
@@ -111,7 +127,7 @@ async def _bypass_once(client, endpoint, short_link, link_bot, msg):
     except Exception as e:
         raise BypassFailed(f"can't resolve {endpoint}: {e}")
     is_bot = isinstance(ent, User) and getattr(ent, "bot", False)
-    state.stage = f"waiting bypass {'bot' if is_bot else 'group'} reply ({endpoint})"
+    await _stage(worker_name, f"waiting bypass {'bot' if is_bot else 'group'} reply ({endpoint})")
     sent = await client.send_message(endpoint, short_link)
     try:
         if is_bot:
@@ -143,13 +159,13 @@ async def _bypass_once(client, endpoint, short_link, link_bot, msg):
         if new_bot != link_bot:
             link_bot = new_bot
         base_f = await _last_id(client, link_bot)
-        state.stage = f"opening bypassed link at @{link_bot}"
+        await _stage(worker_name, f"opening bypassed link at @{link_bot}")
         await client.send_message(link_bot,
                                    f"/start {payload_in}" if payload_in else "/start")
         return link_bot, base_f
 
     # GROUP path — click the tagged 'Open link' button (original behavior)
-    state.stage = f"clicking Open link (back to @{link_bot})"
+    await _stage(worker_name, f"clicking Open link (back to @{link_bot})")
     base_f = await _last_id(client, link_bot)
     _, _, open_bot = await _follow_button(bm, BTN_OPEN_LINK, client)
     if open_bot and open_bot != link_bot:
@@ -160,23 +176,112 @@ async def _bypass_once(client, endpoint, short_link, link_bot, msg):
     return link_bot, base_f
 
 
+async def _alert_admins(text):
+    """v39: DM the ⚠️ alert to the owner (ADMIN_USER_ID) AND every admin from
+    /addadmin, via the CONTROL BOT (botapi.bot) when it's online; falls back
+    to the userbot's DM otherwise. One failure for one recipient never blocks
+    the others. NOTE: a control bot can only DM users who have /start'ed it
+    at least once — the owner has; added admins should too."""
+    import botapi
+    ctl = getattr(botapi, "bot", None)
+    async def _dm(uid):
+        if ctl is not None:
+            try:
+                await ctl.send_message(uid, text, parse_mode="md")
+                return True
+            except Exception as e:
+                log.warning("control-bot alert DM to %s failed (%s) — userbot fallback", uid, e)
+        try:
+            client = state.scrape_client
+            if client is not None:
+                await client.send_message(uid, text, parse_mode="md")
+                return True
+        except Exception as e:
+            log.warning("userbot alert DM to %s failed: %s", uid, e)
+        return False
+    sent = False
+    if ADMIN_USER_ID:
+        sent = await _dm(ADMIN_USER_ID) or sent
+    for a in await DB.get_admins():
+        if a != ADMIN_USER_ID:
+            sent = await _dm(a) or sent
+    if not sent:
+        log.warning("admin alert could not be delivered to anyone: %s", text[:120])
+
+
+async def _alert_bypass_failure(short_link, endpoint, worker_name, target, msg_id, reason):
+    """v39: instant ⚠️ Bypass Failure Alert when a bypass endpoint fails its
+    2nd attempt (or yields an invalid response), in the owner's format."""
+    await _alert_admins(
+        "⚠️ **Bypass Failure Alert**\n"
+        f"• **Failed Link:** `{short_link}`\n"
+        f"• **Bypass Bot:** `@{endpoint}`\n"
+        f"• **Userbot Used:** `{worker_name or 'main'}`\n"
+        f"• **Target Channel:** `{target}`\n"
+        f"• **Post Msg ID:** `{msg_id}`\n"
+        f"• **Reason:** {str(reason)[:200]}")
+    log.warning("bypass failure alert sent: post %s link %s via %s", msg_id, short_link, endpoint)
+
+
+async def _bypass_chain(client, short_link, link_bot, msg, cfg, target, worker_name=None):
+    """v39: route the short link to its bypass endpoint and run it.
+    ROUTING: if the link's domain matches a /domainbypass rule, ONLY that
+    designated endpoint handles the link (other pool bots are NOT tried for
+    it). Otherwise every pool bot from /bypass + /addbypass is tried in list
+    order, then /altbypass as the last-resort fallback.
+    RETRY: each endpoint gets 2 attempts (initial + 1 retry); on the 2nd
+    failure an instant ⚠️ admin alert fires, then the chain moves on.
+    Raises BypassFailed when every candidate failed."""
+    rules = await DB.get_bypass_domains()
+    designated = match_domain_rule(short_link, rules)
+    if designated is not None:
+        candidates = [designated]
+        log.info("post %s: domain rule routes %s -> %s", msg.id, short_link, designated)
+    else:
+        candidates = list(await DB.get_bypass_pool())
+        if not candidates and cfg.get("bypass_id") is not None:
+            candidates = [cfg["bypass_id"]]  # safety net if pool migration hasn't run
+        alt = cfg.get("alt_bypass_id")
+        if alt is not None and alt not in candidates:
+            candidates.append(alt)
+    candidates = [c for c in candidates if c is not None]
+    if not candidates:
+        raise BypassFailed("no bypass endpoints configured (/bypass or /addbypass)")
+    last_err = None
+    for endpoint in candidates:
+        for attempt in (1, 2):
+            if state.abort:
+                raise Abort()
+            try:
+                return await _bypass_once(client, endpoint, short_link,
+                                          link_bot, msg, worker_name)
+            except Abort:
+                raise
+            except BypassFailed as e:
+                last_err = e
+                log.warning("post %s: bypass %s attempt %d/2 failed (%s)",
+                            msg.id, endpoint, attempt, e)
+        await _alert_bypass_failure(short_link, endpoint, worker_name,
+                                    target, msg.id, last_err)
+        if designated is None:
+            continue  # try the next pool bot
+        break       # domain rule: ONLY the designated endpoint handles this link
+    raise BypassFailed(f"all bypass endpoints failed (last: {last_err})")
+
+
 async def _alert_admin(client, target, msg, reason):
     """DM the owner (ADMIN_USER_ID) when BOTH bypass endpoints failed —
-    includes a tappable post link so it can be checked in one tap."""
-    if not ADMIN_USER_ID:
-        return
-    try:
-        tid = str(target)
-        if tid.startswith("-100"):
-            link = f"https://t.me/c/{tid[4:]}/{msg.id}"
-        else:
-            link = f"https://t.me/{tid.lstrip('@')}/{msg.id}"
-        await client.send_message(ADMIN_USER_ID,
-            f"\U0001F6A8 BYPASS FAILED — post needs attention\n"
-            f"Target: {target}\nPost: {link}\nReason: {reason}")
-        log.info("admin alerted for post %s", msg.id)
-    except Exception as e:
-        log.warning("admin alert failed: %s", e)
+    includes a tappable post link so it can be checked in one tap.
+    v39: routed through _alert_admins so owner + added admins all get it."""
+    tid = str(target)
+    if tid.startswith("-100"):
+        link = f"https://t.me/c/{tid[4:]}/{msg.id}"
+    else:
+        link = f"https://t.me/{tid.lstrip('@')}/{msg.id}"
+    await _alert_admins(
+        f"\U0001F6A8 BYPASS FAILED — post needs attention\n"
+        f"Target: {target}\nPost: {link}\nReason: {reason}")
+    log.info("admin alerted for post %s", msg.id)
 
 
 async def _collect_media(client, entity, after_id, max_wait=90, quiet=5):
@@ -235,8 +340,11 @@ def _peek_link_bot(msg):
     return bot
 
 
-async def process_post(client, cfg, msg):
-    target, bypass, dbc = cfg["target_id"], cfg["bypass_id"], cfg["db_id"]
+async def process_post(client, cfg, msg, worker_name=None):
+    """worker_name (v39): set when running under the parallel dispatcher in
+    bot.py — stages then go to state.workers[name] instead of the global
+    state.stage so parallel workers don't clobber each other."""
+    target, bypass, dbc = cfg["target_id"], cfg.get("bypass_id"), cfg["db_id"]
 
     # LINK_BOT is DISCOVERED from THIS post's Download button (per target).
     # The env-var FUBUKI_BOT stays only as a last-resort fallback for weird
@@ -299,28 +407,19 @@ async def process_post(client, cfg, msg):
 
     await asyncio.sleep(STEP_DELAY)
 
-    # 4) bypass CHAIN: try the PRIMARY endpoint (/bypass) first — bot or
-    #    group, both handle the 'Open link' button OR a text-carried link.
-    #    If it doesn't come back with a usable link, fall back to the ALT
-    #    endpoint (/altbypass). When STRING_SESSION2 is the active account,
-    #    IT is the session talking to the alt endpoint. If BOTH fail, the
-    #    admin is DM'd the post link and the post fails loudly (/progress).
-    alt_bypass = cfg.get("alt_bypass_id")
+    # 4) v39: bypass ROUTING + RETRY + ALERT. The short link's domain picks
+    #    its endpoint: a /domainbypass rule sends it ONLY to that bot; every
+    #    other link tries each pool bot (/bypass + /addbypass) in order, then
+    #    /altbypass as the last resort. Each endpoint gets 2 attempts; a 2nd
+    #    failure fires an instant ⚠️ admin alert. If the whole chain fails,
+    #    the owner gets the old tappable-post-link DM and the post raises, so
+    #    the scrape loop skips it per the existing error policy.
     try:
-        link_bot, base_f = await _bypass_once(client, bypass, short_link,
-                                              link_bot, msg)
+        link_bot, base_f = await _bypass_chain(client, short_link, link_bot,
+                                               msg, cfg, target, worker_name)
     except BypassFailed as e:
-        if not alt_bypass:
-            raise RuntimeError(f"primary bypass failed ({e}) — no /altbypass fallback set")
-        log.warning("post %s: primary bypass failed (%s) — trying alt bypass %s",
-                    msg.id, e, alt_bypass)
-        state.stage = f"trying alt bypass {alt_bypass}"
-        try:
-            link_bot, base_f = await _bypass_once(client, alt_bypass, short_link,
-                                                  link_bot, msg)
-        except BypassFailed as e2:
-            await _alert_admin(client, target, msg, f"primary: {e} | alt: {e2}")
-            raise RuntimeError("both bypass endpoints failed — admin alerted")
+        await _alert_admin(client, target, msg, e)
+        raise RuntimeError(f"all bypass endpoints failed ({e}) — admin alerted")
 
     await asyncio.sleep(STEP_DELAY)
 
@@ -377,14 +476,24 @@ async def process_post(client, cfg, msg):
 
     await asyncio.sleep(STEP_DELAY)
 
-    # 8) DB channel: cover post FIRST, then videos + srt
-    state.stage = "sending cover post to DB"
-    await forwarder.send_cover(client, target, msg, dbc)
-    state.stage = f"sending {len(vids)} video(s)+{len(srts)} srt+{len(other)} other to DB"
-    await forwarder.send_media(client, bot, vids + srts + other, dbc)
+    # 8) DB channel: cover post FIRST, then videos + srt — delivered as ONE
+    #    serialized bundle (v39). With parallel userbots, the per-DB lock in
+    #    forwarder.deliver_post_bundle guarantees this post's cover + all its
+    #    media land together before the next post's bundle starts — no
+    #    interleaving in DB, and DB2 inherits the same order via botapi's own
+    #    per-DB mirror lock.
+    bundle = vids + srts + other
+    if worker_name:
+        state.workers[worker_name] = f"delivering post {msg.id} (cover+{len(bundle)} media) to DB"
+    else:
+        state.stage = "sending cover post to DB"
+    await forwarder.deliver_post_bundle(client, target, msg, bot, bundle, dbc)
 
     await DB.incr("posts_done"); await DB.incr("videos_sent", len(vids)); await DB.incr("srt_sent", len(srts))
     if other:
         await DB.incr("other_sent", len(other))
     await DB.set_last_post(target, msg.id)
-    state.stage = "idle"
+    if worker_name:
+        state.workers[worker_name] = "idle"
+    else:
+        state.stage = "idle"

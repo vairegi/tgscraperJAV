@@ -34,8 +34,13 @@ _CMDS = [
     ("deltarget","Remove a target channel"),
     ("setdb",    "Change a target's DB channel"),
     ("adddb",    "Set the fallback DB channel"),
-    ("bypass",   "Set bypass endpoint (group OR bot @username)"),
-    ("altbypass","Fallback bypass — used only if /bypass fails"),
+    ("bypass",   "Set bypass bot #1 (the pool's first entry)"),
+    ("addbypass","Add another bypass bot to the pool (wizard)"),
+    ("removebypass","Remove a pool bypass bot: /removebypass <n>"),
+    ("bypasslist","List the bypass pool + domain rules"),
+    ("domainbypass","Map a short-link domain to one bypass bot (wizard)"),
+    ("deldomain","Remove a domain rule: /deldomain <n>"),
+    ("altbypass","Last-resort fallback bypass — tried after every pool bot fails"),
     ("linkbutton", "List or add LINK_BOT button labels (no restart)"),
     ("removelinkbutton", "Remove a LINK_BOT button label by number"),
     ("goto",     "Set a target's start message (/goto <n> <msg> or link)"),
@@ -70,6 +75,27 @@ _CMDS = [
 
 _pending = {}  # user_id -> (kind, extra)
 log_mirror = logging.getLogger("db2mirror")
+
+# v39: validate a bypass endpoint (GROUP id or BOT @username) via the
+# userbot — shared by /bypass, /altbypass, /addbypass and /domainbypass.
+async def _validate_bypass_endpoint(scrape_client, ev, v):
+    """Returns (ok, is_bot). Replies with the problem and returns (False,
+    None) when the userbot can't resolve it or it isn't a group/bot."""
+    try:
+        ent = await scrape_client.get_entity(v)
+    except Exception as e:
+        await ev.reply(f"⚠️ Can't access that chat with the userbot account: {e}")
+        return False, None
+    is_group = _entity_ok(ent, "group")
+    is_bot = isinstance(ent, User) and getattr(ent, "bot", False)
+    if not (is_group or is_bot):
+        await ev.reply(
+            f"⚠️ {v} isn't a group and isn't a bot — bypass must be one of those.\n"
+            "For a bot, send its @username (e.g. @dex_fekkyeww_bot). "
+            "For a group, paste any message link from the group "
+            "(https://t.me/c/1234567890/12) or its -100… id.")
+        return False, None
+    return True, is_bot
 
 
 async def _admin(uid):
@@ -314,7 +340,9 @@ def register(scrape_client):
             ("ℹ️ INFO", ["help", "ping"]),
             ("👑 ADMINS", ["addadmin", "removeadmin"]),
             ("🎯 SETUP (targets · DB · bypass)",
-             ["target", "targets", "deltarget", "setdb", "adddb", "bypass", "altbypass"]),
+             ["target", "targets", "deltarget", "setdb", "adddb", "bypass",
+              "addbypass", "removebypass", "bypasslist", "domainbypass",
+              "deldomain", "altbypass"]),
             ("🧼 DB2 CLEAN MIRROR (bot)", ["setdb2", "avoidtext", "removeavoid"]),
             ("🔗 CHECKDM PIPELINE (userbot)", ["checkdm"]),
             ("🔘 LINK-BOT BUTTONS", ["linkbutton", "removelinkbutton"]),
@@ -869,6 +897,126 @@ def register(scrape_client):
         _pending[ev.sender_id] = ("target_id", None)
         await ev.reply("Send me the TARGET channel id (numeric like -100… or @username).\nCancel: /cancel")
 
+    # ---------- v39: multi-bypass pool + domain routing wizard ----------
+    @bot.on(events.NewMessage(pattern=r"^/addbypass(?:\s+(.+))?$"))
+    async def addbypass_cmd(ev):
+        if not await _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        if arg:
+            await _do_addbypass(ev, arg)
+            return
+        _pending[ev.sender_id] = ("addbypass", None)
+        await ev.reply("Send me the bypass bot @username (e.g. @BypassBot_A) or a "
+                       "GROUP id (-100… / a t.me/c/ link) to ADD to the bypass pool.\n"
+                       "Pool bots are tried in order for any short link with no domain "
+                       "rule. See the pool with /bypasslist.\nCancel: /cancel")
+
+    async def _do_addbypass(ev, raw):
+        v = _parse_chat_id(raw)
+        ok, is_bot = await _validate_bypass_endpoint(scrape_client, ev, v)
+        if not ok:
+            return
+        pool, added = await DB.add_bypass(v)
+        if added:
+            await ev.reply(f"✅ Added {v} ({'bot' if is_bot else 'group'}) to the bypass "
+                           f"pool — {len(pool)} endpoint(s) total. /bypasslist to view.")
+        else:
+            await ev.reply(f"ℹ️ {v} is already in the bypass pool (#{pool.index(v)+1}).")
+
+    @bot.on(events.NewMessage(pattern=r"^/removebypass(?:\s+(\d+))?$"))
+    async def removebypass_cmd(ev):
+        if not await _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        pool = await DB.get_bypass_pool()
+        if not pool:
+            await ev.reply("The bypass pool is empty — add one with /bypass or /addbypass.")
+            return
+        if not arg.isdigit():
+            listing = "\n".join(f"  {i+1}. `{p}`" for i, p in enumerate(pool))
+            await ev.reply(f"Usage: /removebypass <number>\nPool:\n{listing}")
+            return
+        res = await DB.remove_bypass(int(arg))
+        if res is None:
+            await ev.reply(f"⚠️ No pool endpoint #{arg} — see /bypasslist.")
+            return
+        pool2, removed = res
+        await ev.reply(f"🗑 Removed {removed} from the pool — {len(pool2)} endpoint(s) left.")
+
+    @bot.on(events.NewMessage(pattern=r"^/bypasslist$"))
+    async def bypasslist_cmd(ev):
+        if not await _admin(ev.sender_id):
+            return
+        cfg = await DB.get_config()
+        pool = await DB.get_bypass_pool()
+        rules = await DB.get_bypass_domains()
+        lines = ["🔁 **Bypass pool** (tried in order for links with no domain rule):"]
+        lines += ([f"  {i+1}. `{p}`" for i, p in enumerate(pool)] or ["  (empty)"])
+        lines.append(f"• Last-resort fallback (/altbypass): `{cfg.get('alt_bypass_id')}`")
+        lines.append("🌐 **Domain rules** (these links go ONLY to their bot):")
+        lines += ([f"  {i+1}. `{r['domain']}` → `@{r['endpoint']}`"
+                   for i, r in enumerate(rules)] or ["  (none)"])
+        lines.append("\n/addbypass · /removebypass <n> · /domainbypass · /deldomain <n>")
+        await ev.reply("\n".join(lines))
+
+    @bot.on(events.NewMessage(pattern=r"^/domainbypass(?:\s+([\s\S]+))?$"))
+    async def domainbypass_cmd(ev):
+        if not await _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        if arg:
+            parts = arg.split()
+            if len(parts) == 2:
+                await _do_domainbypass_save(ev, parts[0], parts[1])
+            else:
+                await ev.reply("Usage: /domainbypass <domain> <@bot or group id> — "
+                               "e.g. /domainbypass babylinks.in @BypassBot_A\n"
+                               "or bare /domainbypass for the wizard.")
+            return
+        _pending[ev.sender_id] = ("domainbypass_domain", None)
+        await ev.reply("Step 1/2 — send the short-link DOMAIN to route "
+                       "(e.g. `babylinks.in`, or a wildcard like `aerolinks.*`; "
+                       "pasting a full link works too).\nCancel: /cancel")
+
+    async def _do_domainbypass_save(ev, domain_raw, endpoint_raw):
+        from scraper import norm_domain
+        domain = norm_domain(domain_raw)
+        if not domain:
+            await ev.reply(f"⚠️ Couldn't read a domain from `{domain_raw}` — send e.g. "
+                           "`babylinks.in` or `aerolinks.*`.")
+            return
+        v = _parse_chat_id(endpoint_raw)
+        ok, is_bot = await _validate_bypass_endpoint(scrape_client, ev, v)
+        if not ok:
+            return
+        await DB.add_bypass_domain(domain, v)
+        await ev.reply(f"✅ Domain rule saved: `{domain}` → `{v}` "
+                       f"({'bot' if is_bot else 'group'}).\n"
+                       "Links on that domain go ONLY to that endpoint. /bypasslist to view.")
+
+    @bot.on(events.NewMessage(pattern=r"^/deldomain(?:\s+(\d+))?$"))
+    async def deldomain_cmd(ev):
+        if not await _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        rules = await DB.get_bypass_domains()
+        if not rules:
+            await ev.reply("No domain rules set — add one with /domainbypass.")
+            return
+        if not arg.isdigit():
+            listing = "\n".join(f"  {i+1}. `{r['domain']}` → `@{r['endpoint']}`"
+                                for i, r in enumerate(rules))
+            await ev.reply(f"Usage: /deldomain <number>\nRules:\n{listing}")
+            return
+        res = await DB.remove_bypass_domain(int(arg))
+        if res is None:
+            await ev.reply(f"⚠️ No domain rule #{arg} — see /bypasslist.")
+            return
+        rules2, removed = res
+        await ev.reply(f"🗑 Removed rule `{removed['domain']}` → `@{removed['endpoint']}` "
+                       f"— {len(rules2)} rule(s) left.")
+
     @bot.on(events.NewMessage(pattern=r"^/(bypass|adddb|altbypass)(?:\s+(.+))?$"))
     async def simple_wizard(ev):
         if not await _admin(ev.sender_id):
@@ -877,14 +1025,21 @@ def register(scrape_client):
         arg = (ev.pattern_match.group(2) or "").strip()
         field = {"bypass": "bypass_id", "adddb": "db_id",
                  "altbypass": "alt_bypass_id"}[cmd]
+        if cmd == "bypass" and not arg:
+            # v39: /bypass manages pool slot #1 — show the pool in the prompt
+            pool = await DB.get_bypass_pool()
+            if pool:
+                listing = "\n".join(f"  {i+1}. `{p}`" for i, p in enumerate(pool))
+                await ev.reply(f"Current bypass pool:\n{listing}\n")
         if arg:
             await _save_simple(ev, field, _parse_chat_id(arg))
             return
         _pending[ev.sender_id] = (field, None)
         if field == "bypass_id":
             await ev.reply(
-                "Send me the bypass endpoint — either a GROUP id (like -100…) "
-                "or a BOT @username (e.g. @dex_fekkyeww_bot).\n"
+                "Send me bypass bot #1 — a BOT @username (e.g. @dex_fekkyeww_bot) "
+                "or a GROUP id (like -100…). This REPLACES pool slot #1; add more "
+                "bots with /addbypass.\n"
                 "Bot endpoints reply in DM with the bypassed link in text — no "
                 "'Open link' button needed.\nCancel: /cancel")
         elif field == "alt_bypass_id":
@@ -918,7 +1073,21 @@ def register(scrape_client):
                     "(https://t.me/c/1234567890/12) or its -100… id.")
                 return
             kind = "bot" if is_bot else "group"
-            label = "bypass" if field == "bypass_id" else "ALT bypass"
+            if field == "bypass_id":
+                # v39: /bypass manages pool slot #1 — replace it (or insert
+                # when the pool is empty), keeping any /addbypass extras.
+                pool = await DB.get_bypass_pool()
+                if pool:
+                    pool[0] = v
+                else:
+                    pool = [v]
+                await DB.set_config("bypass_pool", pool)
+                await DB.set_config("bypass_id", pool[0])
+                await ev.reply(f"✅ Bypass pool slot #1 = {v} ({kind}) — "
+                               f"{len(pool)} pool endpoint(s) total. "
+                               "More bots: /addbypass. View: /bypasslist.")
+                return
+            label = "ALT bypass"
             await DB.set_config(field, v)
             await ev.reply(f"✅ Saved {label} = {v} ({kind}). "
                            + ("No 'Open link' button needed — the bypassed t.me link is read from the reply text."
@@ -1043,6 +1212,26 @@ def register(scrape_client):
             _pending.pop(ev.sender_id, None)
             await _do_setdb(ev, ev.raw_text.strip())
             return
+        if kind == "addbypass":  # v39: pool add via wizard
+            _pending.pop(ev.sender_id, None)
+            await _do_addbypass(ev, ev.raw_text.strip())
+            return
+        if kind == "domainbypass_domain":  # v39: step 1 — the domain
+            from scraper import norm_domain
+            domain = norm_domain(ev.raw_text)
+            if not domain:
+                await ev.reply(f"⚠️ Couldn't read a domain from `{ev.raw_text.strip()}` — "
+                               "send e.g. `babylinks.in` or `aerolinks.*`.\nCancel: /cancel")
+                return
+            _pending[ev.sender_id] = ("domainbypass_endpoint", domain)
+            await ev.reply(f"Step 2/2 — domain `{domain}`: now send the bypass bot "
+                           "@username (or group id) that should handle ONLY links on "
+                           "this domain.\nCancel: /cancel")
+            return
+        if kind == "domainbypass_endpoint":  # v39: step 2 — the bot
+            _pending.pop(ev.sender_id, None)
+            await _do_domainbypass_save(ev, extra, ev.raw_text.strip())
+            return
         # simple fields: bypass_id / db_id
         _pending.pop(ev.sender_id, None)
         await _save_simple(ev, kind, _parse_chat_id(ev.raw_text))
@@ -1154,8 +1343,8 @@ def register(scrape_client):
         missing = []
         if not targets:
             missing.append("target (use /target)")
-        if not cfg.get("bypass_id"):
-            missing.append("bypass_id")
+        if not await DB.get_bypass_pool():
+            missing.append("bypass bot (/bypass or /addbypass)")
         if not cfg.get("db_id") and not all(t.get("db_id") for t in targets):
             missing.append("db (per-target via /setdb or fallback via /adddb)")
         if missing:
