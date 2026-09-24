@@ -52,7 +52,7 @@ _CMDS = [
     ("goto",     "Set a target's start message (/goto <n> <msg> or link)"),
     ("reset",    "Reset a target's progress to post 1"),
     ("lastpost", "Newest post in a target channel"),
-    ("scan4duplicates", "v43.1: scan a DB2 channel for duplicate posts (fuzzy captions, userbot-read)"),
+    ("scan4duplicates", "v43.2: duplicate scan of a DB2 channel (story-only fuzzy captions, userbot-read)"),
     ("start",    "Start scraping"),
     ("pause",    "Pause all (bare or /pause all), or one: /pause 2"),
     ("resume",   "Resume all (bare or /resume all), or one: /resume 2"),
@@ -198,6 +198,46 @@ async def _chat_title(client, chat_id):
     if title:
         _TITLE_CACHE[chat_id] = title
     return title
+
+
+
+# ---------------- v43.2: story-only caption extraction for /scan4duplicates ----------------
+# Captions share boilerplate that makes UNRELATED posts look alike: hashtag
+# lines (#uncensored #recommended #new), metadata lines (▸ Episode:- 1,
+# ▸ Subtitle:- English, ▸ Censorship: #Uncensored, ▸ Rating:- ...,
+# 18+ Network: @…) and Telegram's "edited <date>" tail. The duplicate scan
+# must compare ONLY the story description, so those lines are stripped BEFORE
+# the first 10 words are taken.
+_NONSTORY_LINE_RE = re.compile(
+    r"(?:^|\b)(?:episode|subtitles?|censor(?:ship|ed)?|rating|network|audio|"
+    r"quality|resolution|size|duration|genre|genres|studio|release|language|"
+    r"source|seed|leech)\s*[:\-]", re.I)
+_EDITED_TAIL_RE = re.compile(r"edited\s+\w+\s+\d+.*$", re.I)
+
+
+def _story_snippet(text, n_words=10):
+    """Caption -> normalized first-10-words of the STORY lines only.
+    Drops: metadata lines (keyword + ':' anywhere, bullet or not), lines that
+    are only hashtags, emoji-only lines, and the 'edited' tail. Words are
+    lowercased with punctuation stripped, ready for SequenceMatcher."""
+    if not text:
+        return ""
+    text = _EDITED_TAIL_RE.sub("", text)
+    keep = []
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        if _NONSTORY_LINE_RE.search(ln):
+            continue
+        toks = ln.split()
+        if toks and all(t.startswith("#") for t in toks):
+            continue                      # hashtag-only line
+        words = re.findall(r"\w+", ln.lower())
+        if not words:
+            continue                      # emoji/punctuation-only line
+        keep.append(" ".join(words))
+    return " ".join(" ".join(keep).split()[:n_words])
 
 
 def _c_link(chat_id, msg_id=None):
@@ -1551,6 +1591,9 @@ def register(scrape_client, sm=None):
         """Scan a DB2 channel for duplicate posts by caption similarity.
         v43.1: history is read by the USERBOT (bot accounts are blocked from
         GetHistoryRequest by Telegram, even as admins).
+        v43.2: only the STORY paragraph is compared — metadata lines
+        (Episode/Subtitle/Censorship/Rating/Network...), hashtag lines
+        (#uncensored #recommended) and the 'edited' tail are stripped first.
         Compares the first 10 words (lowercased, punctuation stripped) of every
         text/caption with difflib.SequenceMatcher — pairs >= 75% similar are
         flagged, clustered (A~B and B~C merge into one group), and reported as
@@ -1584,11 +1627,11 @@ def register(scrape_client, sm=None):
                 count += 1
                 if count % 100 == 0:
                     await asyncio.sleep(0.1)  # never starve the event loop
-                text = (m.message or "").strip()
-                if not text:
-                    continue
-                words = re.findall(r"\w+", text.lower())[:10]
-                if len(words) < 3:   # tiny captions false-positive on everything
+                # v43.2: compare ONLY the story description — shared hashtags
+                # and the Episode/Subtitle/Censorship/Rating/Network block must
+                # never make two different posts match
+                words = _story_snippet(m.message or "").split()
+                if len(words) < 3:   # tiny snippets false-positive on everything
                     continue
                 snippets.append((m.id, " ".join(words)))
         except Exception as e:
