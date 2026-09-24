@@ -52,7 +52,7 @@ _CMDS = [
     ("goto",     "Set a target's start message (/goto <n> <msg> or link)"),
     ("reset",    "Reset a target's progress to post 1"),
     ("lastpost", "Newest post in a target channel"),
-    ("scan4duplicates", "v43: scan a DB2 channel for duplicate posts (fuzzy caption match)"),
+    ("scan4duplicates", "v43.1: scan a DB2 channel for duplicate posts (fuzzy captions, userbot-read)"),
     ("start",    "Start scraping"),
     ("pause",    "Pause all (bare or /pause all), or one: /pause 2"),
     ("resume",   "Resume all (bare or /resume all), or one: /resume 2"),
@@ -1549,7 +1549,8 @@ def register(scrape_client, sm=None):
     @bot.on(events.NewMessage(pattern=r"^/scan4duplicates(?:\s+(\S+))?$"))
     async def scan4duplicates_cmd(ev):
         """Scan a DB2 channel for duplicate posts by caption similarity.
-        The control BOT is admin in DB2, so it reads channel history natively.
+        v43.1: history is read by the USERBOT (bot accounts are blocked from
+        GetHistoryRequest by Telegram, even as admins).
         Compares the first 10 words (lowercased, punctuation stripped) of every
         text/caption with difflib.SequenceMatcher — pairs >= 75% similar are
         flagged, clustered (A~B and B~C merge into one group), and reported as
@@ -1564,18 +1565,22 @@ def register(scrape_client, sm=None):
                            "(numeric id, @username, or a t.me/c/… message link).")
             return
         cid = _parse_chat_id(arg)
+        # v43.1: scan via the USERBOT, not the control bot — bot accounts are
+        # BLOCKED from GetHistoryRequest even as channel admins ("The API access
+        # for bot users is restricted"), so bot.iter_messages always aborts at 0
+        # messages. The userbot only needs channel MEMBERSHIP (join with /invite).
         try:
-            ent = await bot.get_entity(cid)
+            ent = await scrape_client.get_entity(cid)
         except Exception as e:
-            await ev.reply(f"⚠️ Can't access {cid} — the BOT must be a member/admin "
-                           f"of that channel.\n`{e}`")
+            await ev.reply(f"⚠️ Can't access {cid} — the USERBOT must be a member "
+                           f"of that channel (join it with /invite).\n`{e}`")
             return
         title = getattr(ent, "title", None) or str(cid)
         status = await ev.reply(f"🔍 Scanning **{title}** for duplicate captions…")
         snippets = []  # (msg_id, normalized 10-word snippet)
         count = 0
         try:
-            async for m in bot.iter_messages(ent):
+            async for m in scrape_client.iter_messages(ent):  # v43.1: userbot reads history
                 count += 1
                 if count % 100 == 0:
                     await asyncio.sleep(0.1)  # never starve the event loop
