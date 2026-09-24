@@ -52,7 +52,7 @@ _CMDS = [
     ("goto",     "Set a target's start message (/goto <n> <msg> or link)"),
     ("reset",    "Reset a target's progress to post 1"),
     ("lastpost", "Newest post in a target channel"),
-    ("scan4duplicates", "v43.2: duplicate scan of a DB2 channel (story-only fuzzy captions, userbot-read)"),
+    ("scan4duplicates", "v43.3: find duplicate COVER posts in a DB2 channel (story-only fuzzy match)"),
     ("start",    "Start scraping"),
     ("pause",    "Pause all (bare or /pause all), or one: /pause 2"),
     ("resume",   "Resume all (bare or /resume all), or one: /resume 2"),
@@ -400,25 +400,24 @@ def register(scrape_client, sm=None):
             return f"/{name} — {d.get(name, '')}"
         sections = [
             # v40: regrouped — mirror the order things are used in
-            ("ℹ️ INFO", ["help", "ping", "checkram", "stats"]),
-            ("👑 ADMINS", ["addadmin", "removeadmin"]),
-            ("🎯 TARGETS & DB", ["target", "targets", "targets_text", "deltarget",
-                                       "setdb", "adddb", "setdb2", "targatelinkmode"]),
-            ("🔐 BYPASS", ["bypass", "addbypass", "removebypass", "bypasslist",
-                                 "domainbypass", "deldomain", "altbypass"]),
-            ("🧼 DB2 TEXT CLEANING", ["avoid", "removegavoid", "replaceword",
-                                           "removereplace", "avoidtext", "removeavoid",
-                                           "keepimages"]),
-            ("👥 USERBOTS", ["invite", "leave", "add", "checkdm"]),
+            # v43.3: regrouped in workflow order
+            ("🎯 TARGETS & CHANNELS", ["target", "targatelinkmode", "targets",
+                "targets_text", "setdb", "setdb2", "adddb", "deltarget"]),
+            ("🔐 BYPASS SETUP", ["bypass", "addbypass", "removebypass",
+                "bypasslist", "domainbypass", "deldomain", "altbypass"]),
+            ("🧼 CAPTION CLEANING (DB2)", ["keepimages", "avoid", "avoidtext",
+                "removeavoid", "removegavoid", "replaceword", "removereplace"]),
             ("🔘 LINK-BOT BUTTONS", ["linkbutton", "removelinkbutton"]),
-            ("▶️ SCRAPING", ["start", "pause", "resume", "stop", "skip", "cancel"]),
-            ("📊 MONITOR", ["status", "current", "progress", "lastpost",
-                                "scan4duplicates"]),
-            ("🧭 PROGRESS CONTROL", ["goto", "reset"]),
-            ("✏️ BULK TEXT EDIT", ["replace", "deletetext"]),
-            ("🧹 MASS DELETE", ["massdlt", "massdlt_status", "massdlt_stop"]),
-            ("📨 FORWARD / COPY",
-             ["forward", "forward_status", "forward_stop", "forward_resume"]),
+            ("▶️ SCRAPING CONTROL", ["start", "pause", "resume", "skip",
+                "stop", "goto", "reset"]),
+            ("📊 MONITOR & SCAN", ["status", "current", "progress", "lastpost",
+                "scan4duplicates", "checkram"]),
+            ("🛠️ BULK JOBS", ["replace", "deletetext", "massdlt",
+                "massdlt_status", "massdlt_stop", "forward", "forward_status",
+                "forward_stop", "forward_resume"]),
+            ("👥 USERBOTS & ADMINS", ["stats", "invite", "leave", "add",
+                "checkdm", "addadmin", "removeadmin"]),
+            ("ℹ️ MISC", ["help", "ping", "cancel"]),
         ]
         lines = ["📖 COMMANDS"]
         shown = set()
@@ -1588,12 +1587,15 @@ def register(scrape_client, sm=None):
     # ---------- v43: DB2 duplicate scanner ----------
     @bot.on(events.NewMessage(pattern=r"^/scan4duplicates(?:\s+(\S+))?$"))
     async def scan4duplicates_cmd(ev):
-        """Scan a DB2 channel for duplicate posts by caption similarity.
+        """Scan a DB2 channel for duplicate COVER-POST captions.
         v43.1: history is read by the USERBOT (bot accounts are blocked from
         GetHistoryRequest by Telegram, even as admins).
         v43.2: only the STORY paragraph is compared — metadata lines
         (Episode/Subtitle/Censorship/Rating/Network...), hashtag lines
         (#uncensored #recommended) and the 'edited' tail are stripped first.
+        v43.3: only COVER POSTS (photo messages) are scanned — video/.srt
+        captions are ignored, because the cover is the post's identity and
+        identical videos carry near-identical captions anyway.
         Compares the first 10 words (lowercased, punctuation stripped) of every
         text/caption with difflib.SequenceMatcher — pairs >= 75% similar are
         flagged, clustered (A~B and B~C merge into one group), and reported as
@@ -1627,6 +1629,10 @@ def register(scrape_client, sm=None):
                 count += 1
                 if count % 100 == 0:
                     await asyncio.sleep(0.1)  # never starve the event loop
+                # v43.3: only COVER POSTS count — skip video and .srt
+                # captions entirely; the photo post is the post's identity
+                if not m.photo:
+                    continue
                 # v43.2: compare ONLY the story description — shared hashtags
                 # and the Episode/Subtitle/Censorship/Rating/Network block must
                 # never make two different posts match
