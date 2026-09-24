@@ -33,6 +33,7 @@ from telethon.errors import UserNotParticipantError
 import db as DB
 from config import (MASS_DELETE_CHUNK, MASS_DELETE_DELAY, FORWARD_DELAY,
                     FORWARD_SWITCH_EVERY,  # v44: userbot rotation cadence
+                    FORWARD_BATCH,         # v44.1: media batch size
                     BULK_MAX_FLOOD, BULK_PROGRESS_EVERY, ADMIN_USER_ID)
 from flow import state
 
@@ -408,7 +409,7 @@ async def _forward_worker(client, ev, src_ent, tgt_ent, msgs, status, done_base,
     fwd_since_switch = 0   # messages sent by the current account
 
     async def _fwd_rotate(reason):
-        nonlocal client, fwd_idx, fwd_since_switch
+        nonlocal client, src_ent, tgt_ent, fwd_idx, fwd_since_switch
         if fwd_n <= 1:
             return False
         now = time.time()
@@ -429,7 +430,18 @@ async def _forward_worker(client, ev, src_ent, tgt_ent, msgs, status, done_base,
         fwd_idx = free[0]
         client = fwd_clients[fwd_idx]
         fwd_since_switch = 0
-        log.info("forward ROTATE (%s) -> account %d/%d", reason, fwd_idx + 1, fwd_n)
+        # v44.1: entity objects are ACCOUNT-BOUND (access hashes) — acc2 could
+        # not send into entities resolved by acc1 ("Invalid channel object,
+        # caused by SendMediaRequest"). Re-resolve BOTH channels for the new
+        # account immediately after every rotation.
+        try:
+            src_ent = await client.get_entity(source_key)
+            tgt_ent = await client.get_entity(target_key)
+        except Exception as e:
+            log.warning("forward: entity rebind on account %d failed: %s",
+                        fwd_idx + 1, e)
+        log.info("forward ROTATE (%s) -> account %d/%d (entities re-resolved)",
+                 reason, fwd_idx + 1, fwd_n)
         try:
             await status.edit(f"🔄 Forward rotated to userbot {fwd_idx + 1}/{fwd_n} "
                               f"({reason}) — {job.processed}/{job.total} done.")
@@ -437,47 +449,92 @@ async def _forward_worker(client, ev, src_ent, tgt_ent, msgs, status, done_base,
             pass
         return True
 
+    async def _fwd_save_pos():
+        if full_ids is not None:
+            await DB.set_config("fwd_job", {
+                "target": target_key, "source": source_key,
+                "ids": full_ids, "pos": job.processed,
+                "src_title": getattr(src_ent, "title", "")})
+
     try:
-        for m in msgs:
+        i = 0
+        while i < len(msgs):
             if job.stop:
                 break
             if fwd_n > 1 and fwd_since_switch >= FORWARD_SWITCH_EVERY:
-                # proactive handoff — cadence-based, not flood-based
                 fwd_parked[fwd_idx] = time.time() + FORWARD_SWITCH_EVERY * FORWARD_DELAY
                 await _fwd_rotate(f"{FORWARD_SWITCH_EVERY} messages done")
-            while True:
+            m = msgs[i]
+            if getattr(m, "media", None) is not None:
+                # v44.1: BATCH consecutive media (up to FORWARD_BATCH) into ONE
+                # group send; one pace per batch instead of per message.
+                group, j = [], i
+                while (j < len(msgs) and len(group) < FORWARD_BATCH
+                       and getattr(msgs[j], "media", None) is not None):
+                    group.append(msgs[j])
+                    j += 1
+                # v44.1: file references are ACCOUNT-BOUND — refetch the batch
+                # with the CURRENT account so its media is sendable by it
                 try:
-                    if getattr(m, "media", None) is not None:
-                        await forwarder.send_media(client, src_ent, [m], tgt_ent)
-                    elif (m.text or "").strip():
-                        await client.send_message(tgt_ent, m.message,
-                                                  buttons=getattr(m, "buttons", None))
-                    job.processed += 1
-                    fwd_since_switch += 1
-                    if full_ids is not None:
-                        await DB.set_config("fwd_job", {
-                            "target": target_key, "source": source_key,
-                            "ids": full_ids, "pos": job.processed,
-                            "src_title": getattr(src_ent, "title", "")})
-                    break
-                except FloodWaitError as fe:
-                    fwd_parked[fwd_idx] = time.time() + fe.seconds  # v44: rest it
-                    if fwd_n > 1 and await _fwd_rotate(f"FloodWait {fe.seconds}s"):
-                        continue  # SAME message retried on the rested account
-                    if await _sleep_flood(fe, job, status):
-                        continue
-                    job.failed += 1
-                    break
+                    fresh = await client.get_messages(src_ent,
+                                                      ids=[g.id for g in group])
+                    group = [g for g in fresh if g] or group
                 except Exception as e:
-                    log.warning("forward msg %s failed: %s", getattr(m, "id", "?"), e)
-                    job.failed += 1
-                    job.processed += 1
-                    break
-            if job.processed and job.processed % BULK_PROGRESS_EVERY == 0:
-                try:
-                    await status.edit(job.progress_text())
-                except Exception:
-                    pass
+                    log.warning("forward: batch refetch failed (%s) — using cached", e)
+                while True:
+                    try:
+                        await forwarder.send_media(client, src_ent, group, tgt_ent)
+                        job.processed += len(group)
+                        fwd_since_switch += len(group)
+                        await _fwd_save_pos()
+                        break
+                    except FloodWaitError as fe:
+                        fwd_parked[fwd_idx] = time.time() + fe.seconds
+                        if fwd_n > 1 and await _fwd_rotate(f"FloodWait {fe.seconds}s"):
+                            try:
+                                fresh = await client.get_messages(
+                                    src_ent, ids=[g.id for g in group])
+                                group = [g for g in fresh if g] or group
+                            except Exception:
+                                pass
+                            continue
+                        if await _sleep_flood(fe, job, status):
+                            continue
+                        job.failed += len(group)
+                        job.processed += len(group)
+                        break
+                    except Exception as e:
+                        log.warning("forward batch %s failed: %s",
+                                    [g.id for g in group], e)
+                        job.failed += len(group)
+                        job.processed += len(group)
+                        break
+                i = j
+            else:
+                while True:
+                    try:
+                        if (m.text or "").strip():
+                            await client.send_message(tgt_ent, m.message,
+                                                      buttons=getattr(m, "buttons", None))
+                        job.processed += 1
+                        fwd_since_switch += 1
+                        await _fwd_save_pos()
+                        break
+                    except FloodWaitError as fe:
+                        fwd_parked[fwd_idx] = time.time() + fe.seconds
+                        if fwd_n > 1 and await _fwd_rotate(f"FloodWait {fe.seconds}s"):
+                            continue
+                        if await _sleep_flood(fe, job, status):
+                            continue
+                        job.failed += 1
+                        job.processed += 1
+                        break
+                    except Exception as e:
+                        log.warning("forward msg %s failed: %s", getattr(m, "id", "?"), e)
+                        job.failed += 1
+                        job.processed += 1
+                        break
+                i += 1
             await _pace(FORWARD_DELAY)
         job.status = "stopped" if job.stop else "done"
         verb = "Stopped" if job.stop else "Done"

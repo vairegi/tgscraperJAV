@@ -62,6 +62,9 @@ FORWARD_DELAY = float(os.environ.get("FORWARD_DELAY", "4"))
 # v44: /forward hands off to the next userbot after N messages (a
 # FloodWait rotates immediately and the flooded account rests).
 FORWARD_SWITCH_EVERY = int(os.environ.get("FORWARD_SWITCH_EVERY", "200"))
+# v44.1: consecutive media messages are sent in BATCHES of N (one
+# paced group send instead of N individual ones) — much faster.
+FORWARD_BATCH = int(os.environ.get("FORWARD_BATCH", "10"))
 
 # Health-check server
 PORT = int(os.environ.get("PORT", "10000"))  # Render injects PORT
