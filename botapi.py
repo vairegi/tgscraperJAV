@@ -12,6 +12,7 @@ from config import (API_ID, API_HASH, BOT_TOKEN, ADMIN_USER_ID, BTN_SHORT_LINK,
                     BULK_EDIT_DELAY, BULK_MAX_FLOOD, BULK_PROGRESS_EVERY)
 from telethon.errors import FloodWaitError
 import asyncio
+import difflib
 import logging
 import re
 import shlex
@@ -51,6 +52,7 @@ _CMDS = [
     ("goto",     "Set a target's start message (/goto <n> <msg> or link)"),
     ("reset",    "Reset a target's progress to post 1"),
     ("lastpost", "Newest post in a target channel"),
+    ("scan4duplicates", "v43: scan a DB2 channel for duplicate posts (fuzzy caption match)"),
     ("start",    "Start scraping"),
     ("pause",    "Pause all (bare or /pause all), or one: /pause 2"),
     ("resume",   "Resume all (bare or /resume all), or one: /resume 2"),
@@ -370,7 +372,8 @@ def register(scrape_client, sm=None):
             ("👥 USERBOTS", ["invite", "leave", "add", "checkdm"]),
             ("🔘 LINK-BOT BUTTONS", ["linkbutton", "removelinkbutton"]),
             ("▶️ SCRAPING", ["start", "pause", "resume", "stop", "skip", "cancel"]),
-            ("📊 MONITOR", ["status", "current", "progress", "lastpost"]),
+            ("📊 MONITOR", ["status", "current", "progress", "lastpost",
+                                "scan4duplicates"]),
             ("🧭 PROGRESS CONTROL", ["goto", "reset"]),
             ("✏️ BULK TEXT EDIT", ["replace", "deletetext"]),
             ("🧹 MASS DELETE", ["massdlt", "massdlt_status", "massdlt_stop"]),
@@ -1541,6 +1544,115 @@ def register(scrape_client, sm=None):
         cur = await DB.get_keep_images()
         await ev.reply(f"🖼 keepimages is currently **{'ON' if cur else 'OFF'}** "
                        "(global, all targets).\nUsage: /keepimages on|off")
+
+    # ---------- v43: DB2 duplicate scanner ----------
+    @bot.on(events.NewMessage(pattern=r"^/scan4duplicates(?:\s+(\S+))?$"))
+    async def scan4duplicates_cmd(ev):
+        """Scan a DB2 channel for duplicate posts by caption similarity.
+        The control BOT is admin in DB2, so it reads channel history natively.
+        Compares the first 10 words (lowercased, punctuation stripped) of every
+        text/caption with difflib.SequenceMatcher — pairs >= 75% similar are
+        flagged, clustered (A~B and B~C merge into one group), and reported as
+        t.me/c/ links in chunks that respect Telegram's length limit. Fully
+        async: yields every 100 fetched messages and every 50 compare rounds
+        so the scraper loop is never blocked."""
+        if not await _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        if not arg:
+            await ev.reply("Usage: /scan4duplicates <channel_id> — the DB2 channel to scan "
+                           "(numeric id, @username, or a t.me/c/… message link).")
+            return
+        cid = _parse_chat_id(arg)
+        try:
+            ent = await bot.get_entity(cid)
+        except Exception as e:
+            await ev.reply(f"⚠️ Can't access {cid} — the BOT must be a member/admin "
+                           f"of that channel.\n`{e}`")
+            return
+        title = getattr(ent, "title", None) or str(cid)
+        status = await ev.reply(f"🔍 Scanning **{title}** for duplicate captions…")
+        snippets = []  # (msg_id, normalized 10-word snippet)
+        count = 0
+        try:
+            async for m in bot.iter_messages(ent):
+                count += 1
+                if count % 100 == 0:
+                    await asyncio.sleep(0.1)  # never starve the event loop
+                text = (m.message or "").strip()
+                if not text:
+                    continue
+                words = re.findall(r"\w+", text.lower())[:10]
+                if len(words) < 3:   # tiny captions false-positive on everything
+                    continue
+                snippets.append((m.id, " ".join(words)))
+        except Exception as e:
+            try:
+                await status.edit(f"⚠️ Scan aborted after {count} message(s): `{e}`")
+            except Exception:
+                pass
+            return
+        # pairwise fuzzy compare — quick_ratio pre-filters keep the O(n²) cheap;
+        # matching pairs merge into clusters via union-find so a triple duplicate
+        # reports as ONE group with 3 links, not two overlapping pairs
+        parent = list(range(len(snippets)))
+
+        def _find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for i in range(len(snippets)):
+            si = snippets[i][1]
+            for j in range(i + 1, len(snippets)):
+                sm = difflib.SequenceMatcher(None, si, snippets[j][1])
+                if sm.real_quick_ratio() < 0.75 or sm.quick_ratio() < 0.75:
+                    continue
+                if sm.ratio() >= 0.75:
+                    ri, rj = _find(i), _find(j)
+                    if ri != rj:
+                        parent[ri] = rj
+            if i % 50 == 0:
+                await asyncio.sleep(0)  # yield during the O(n²) pass
+        clusters = {}
+        for idx in range(len(snippets)):
+            clusters.setdefault(_find(idx), []).append(idx)
+        groups = [sorted(g, key=lambda x: snippets[x][0])
+                  for g in clusters.values() if len(g) > 1]
+        if not groups:
+            try:
+                await status.edit(f"✅ **{title}**: scanned {count} message(s) "
+                                  f"({len(snippets)} with captions) — no duplicates found.")
+            except Exception:
+                pass
+            return
+        lines = [f"🔍 **Duplicates Found in {title}:**",
+                 f"(scanned {count} messages — {len(groups)} duplicate group(s))\n"]
+        for g in sorted(groups, key=lambda g: snippets[g[0]][0]):
+            disp = snippets[g[0]][1]
+            disp = disp[:80] + ("…" if len(disp) > 80 else "")
+            lines.append(f'📝 Matching Text: *"{disp}"*')
+            for k, idx in enumerate(g):
+                lines.append(f"🔗 Link {k + 1}: {_c_link(cid, snippets[idx][0])}")
+            lines.append("")
+        # chunk the report to respect Telegram's ~4096-char message limit
+        chunks, cur = [], ""
+        for ln in "\n".join(lines).split("\n"):
+            if cur and len(cur) + len(ln) + 1 > 3500:
+                chunks.append(cur)
+                cur = ln
+            else:
+                cur = (cur + "\n" + ln) if cur else ln
+        if cur:
+            chunks.append(cur)
+        try:
+            await status.edit(chunks[0])
+        except Exception:
+            await ev.reply(chunks[0])
+        for c in chunks[1:]:
+            await ev.reply(c)
+            await asyncio.sleep(0.5)
 
     @bot.on(events.NewMessage(pattern=r"^/cancel$"))
     async def cancel(ev):
