@@ -32,6 +32,7 @@ from telethon.errors import UserNotParticipantError
 
 import db as DB
 from config import (MASS_DELETE_CHUNK, MASS_DELETE_DELAY, FORWARD_DELAY,
+                    FORWARD_SWITCH_EVERY,  # v44: userbot rotation cadence
                     BULK_MAX_FLOOD, BULK_PROGRESS_EVERY, ADMIN_USER_ID)
 from flow import state
 
@@ -277,7 +278,11 @@ async def _massdlt_worker(client, ev, ent, ids, status):
 # FORWARD (copy, no tag) — /forward <target> <source> <start_link> <end_link>
 # --------------------------------------------------------------------------
 
-async def forward_start(scrape_client, ev, target, source, start_link, end_link):
+async def forward_start(scrape_client, ev, target, source, start_link, end_link,
+                        sm=None):
+    """v44: sm = SessionManager so the forward can rotate across ALL userbot
+    accounts — a FloodWait hands the SAME message to the next rested account,
+    and every FORWARD_SWITCH_EVERY messages the baton passes anyway."""
     if forward_job.status == "running":
         await ev.reply("⚠️ A /forward run is already in progress — "
                        "/forward_status to watch, /forward_stop to stop it.")
@@ -318,10 +323,11 @@ async def forward_start(scrape_client, ev, target, source, start_link, end_link)
                                     "src_title": getattr(src_ent, "title", str(source))})
     forward_job.task = asyncio.ensure_future(
         _forward_worker(scrape_client, ev, src_ent, tgt_ent, msgs, status, 0,
-                        full_ids=full_ids, target_key=target, source_key=source))
+                        full_ids=full_ids, target_key=target, source_key=source,
+                        sm=sm))  # v44
 
 
-async def forward_resume(scrape_client, ev):
+async def forward_resume(scrape_client, ev, sm=None):  # v44: rotation on resume too
     saved = await DB.get_config("fwd_job")
     if not saved or not saved.get("ids"):
         await ev.reply("⚠️ No stopped/interrupted forward to resume — start one with /forward.")
@@ -358,12 +364,23 @@ async def forward_resume(scrape_client, ev):
     forward_job.task = asyncio.ensure_future(
         _forward_worker(scrape_client, ev, src_ent, tgt_ent, msgs, status, pos,
                         full_total=len(ids), full_ids=ids,
-                        target_key=saved["target"], source_key=saved["source"]))
+                        target_key=saved["target"], source_key=saved["source"],
+                        sm=sm))  # v44
 
 
 async def _forward_worker(client, ev, src_ent, tgt_ent, msgs, status, done_base,
                           full_total=None, full_ids=None,
-                          target_key=None, source_key=None):
+                          target_key=None, source_key=None, sm=None):
+    """v44: sm (SessionManager) enables ACCOUNT ROTATION —
+    - every FORWARD_SWITCH_EVERY sent messages the job moves to the next
+      userbot on its own (even without any flood), spreading the load;
+    - a FloodWait parks THAT account for its full wait and immediately retries
+      the SAME message on the next rested account (entities are re-resolved per
+      account — access hashes are account-bound);
+    - only when EVERY account is flood-parked does the job sleep for the
+      shortest remaining wait, then continue.
+    Single-session setups behave exactly as before (falls back to sleeping the
+    flood through in place)."""
     import forwarder
     job = forward_job
     job.stop = False; job.status = "running"; job.failed = 0; job.floods = 0
@@ -383,10 +400,51 @@ async def _forward_worker(client, ev, src_ent, tgt_ent, msgs, status, done_base,
             "/forward_stop to stop, /forward_resume to continue.")
     except Exception:
         pass
+    # v44: rotation state
+    fwd_clients = sm.all() if sm else [client]
+    fwd_n = len(fwd_clients)
+    fwd_idx = 0
+    fwd_parked = {}        # account index -> unix ts until which it rests
+    fwd_since_switch = 0   # messages sent by the current account
+
+    async def _fwd_rotate(reason):
+        nonlocal client, fwd_idx, fwd_since_switch
+        if fwd_n <= 1:
+            return False
+        now = time.time()
+        free = [i for i in range(fwd_n) if fwd_parked.get(i, 0) <= now]
+        if not free:
+            # everyone is resting — sleep the shortest wait, then all are free
+            wait = max(5, min(fwd_parked.values()) - now)
+            job.floods += 1
+            log.warning("forward: ALL %d accounts flood-parked — sleeping %ds",
+                        fwd_n, wait)
+            try:
+                await status.edit(f"⏳ All {fwd_n} userbots hit flood limits — "
+                                  f"resting {int(wait)}s, then continuing…")
+            except Exception:
+                pass
+            await asyncio.sleep(wait)
+            free = list(range(fwd_n))
+        fwd_idx = free[0]
+        client = fwd_clients[fwd_idx]
+        fwd_since_switch = 0
+        log.info("forward ROTATE (%s) -> account %d/%d", reason, fwd_idx + 1, fwd_n)
+        try:
+            await status.edit(f"🔄 Forward rotated to userbot {fwd_idx + 1}/{fwd_n} "
+                              f"({reason}) — {job.processed}/{job.total} done.")
+        except Exception:
+            pass
+        return True
+
     try:
         for m in msgs:
             if job.stop:
                 break
+            if fwd_n > 1 and fwd_since_switch >= FORWARD_SWITCH_EVERY:
+                # proactive handoff — cadence-based, not flood-based
+                fwd_parked[fwd_idx] = time.time() + FORWARD_SWITCH_EVERY * FORWARD_DELAY
+                await _fwd_rotate(f"{FORWARD_SWITCH_EVERY} messages done")
             while True:
                 try:
                     if getattr(m, "media", None) is not None:
@@ -395,6 +453,7 @@ async def _forward_worker(client, ev, src_ent, tgt_ent, msgs, status, done_base,
                         await client.send_message(tgt_ent, m.message,
                                                   buttons=getattr(m, "buttons", None))
                     job.processed += 1
+                    fwd_since_switch += 1
                     if full_ids is not None:
                         await DB.set_config("fwd_job", {
                             "target": target_key, "source": source_key,
@@ -402,6 +461,9 @@ async def _forward_worker(client, ev, src_ent, tgt_ent, msgs, status, done_base,
                             "src_title": getattr(src_ent, "title", "")})
                     break
                 except FloodWaitError as fe:
+                    fwd_parked[fwd_idx] = time.time() + fe.seconds  # v44: rest it
+                    if fwd_n > 1 and await _fwd_rotate(f"FloodWait {fe.seconds}s"):
+                        continue  # SAME message retried on the rested account
                     if await _sleep_flood(fe, job, status):
                         continue
                     job.failed += 1

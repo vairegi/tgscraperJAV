@@ -58,7 +58,10 @@ BULK_PROGRESS_EVERY = int(os.environ.get("BULK_PROGRESS_EVERY", "10"))  # status
 # chunks, so a 2000-message range is deleted piece-by-piece, never flooded.
 MASS_DELETE_CHUNK = int(os.environ.get("MASS_DELETE_CHUNK", "100"))   # ids per delete call
 MASS_DELETE_DELAY = float(os.environ.get("MASS_DELETE_DELAY", "3"))   # seconds between chunks
-FORWARD_DELAY = float(os.environ.get("FORWARD_DELAY", "3"))           # seconds between forwarded messages
+FORWARD_DELAY = float(os.environ.get("FORWARD_DELAY", "4"))
+# v44: /forward hands off to the next userbot after N messages (a
+# FloodWait rotates immediately and the flooded account rests).
+FORWARD_SWITCH_EVERY = int(os.environ.get("FORWARD_SWITCH_EVERY", "200"))
 
 # Health-check server
 PORT = int(os.environ.get("PORT", "10000"))  # Render injects PORT

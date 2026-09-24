@@ -585,8 +585,17 @@ def register(scrape_client, sm=None):
                            "Stops/crashes are resumable with /forward_resume.")
             return
         tgt, src, s, e = parts
+        # v44: keep the raw source key for link validation, resolve the real
+        # id separately — feeding _parse_chat_id(src) into _resolve_range made
+        # Telegram resolve a t.me/c/<digits>/<msg> link as a PEER id and the
+        # "links don't belong to the given chat_id" guard killed the run.
+        src_raw = src.strip()
+        src_id = _parse_chat_id(src)
+        m = re.search(r"(?:https?://)?t\.me/c/(\d+)(?:/\d+)?", src_raw)
+        if m:
+            src_id = int("-100" + m.group(1))
         await MTM.forward_start(scrape_client, ev, _parse_chat_id(tgt),
-                                _parse_chat_id(src), s, e)
+                                src_id, s, e, sm=sm)  # v44: rotation pool
 
     @bot.on(events.NewMessage(pattern=r"^/forward_status$"))
     async def forward_status_cmd(ev):
@@ -620,7 +629,7 @@ def register(scrape_client, sm=None):
     async def forward_resume_cmd(ev):
         if not await _admin(ev.sender_id):
             return
-        await MTM.forward_resume(scrape_client, ev)
+        await MTM.forward_resume(scrape_client, ev, sm=sm)  # v44
 
     @bot.on(events.NewMessage(pattern=r"^/add(?:\s+([\s\S]+))?$"))
     async def add_cmd(ev):
