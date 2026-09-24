@@ -14,6 +14,7 @@ from telethon.tl.types import User
 from config import (BTN_DOWNLOAD, BTN_SHORT_LINK, BTN_OPEN_LINK, FUBUKI_BOT, MEDIA_BOT,
                     ADMIN_USER_ID, WAIT_BOT_REPLY, WAIT_BYPASS_REPLY, POLL_INTERVAL, STEP_DELAY)
 from scraper import (find_button, parse_tg_start, first_url, norm, is_video_msg, is_srt_msg,
+                     find_caption_url, is_image_msg,  # v42: caption links + keepimages
                      match_domain_rule)  # v39: domain-based bypass routing
 import db as DB
 import forwarder
@@ -164,15 +165,19 @@ async def _bypass_once(client, endpoint, short_link, link_bot, msg, worker_name=
                                    f"/start {payload_in}" if payload_in else "/start")
         return link_bot, base_f
 
-    # GROUP path — click the tagged 'Open link' button (original behavior)
+    # GROUP path — click the tagged 'Open link' button (original behavior).
+    # v42: base_f is taken AFTER the button is followed — with caption-mode
+    # targets link_bot can still be unknown (None) here, so computing it
+    # before the click was impossible; the open_bot result resolves the bot.
     await _stage(worker_name, f"clicking Open link (back to @{link_bot})")
-    base_f = await _last_id(client, link_bot)
     _, _, open_bot = await _follow_button(bm, BTN_OPEN_LINK, client)
     if open_bot and open_bot != link_bot:
         log.info("post %s: Open link routes to @%s (not @%s) — switching",
                  msg.id, open_bot, link_bot)
         link_bot = open_bot
-        base_f = await _last_id(client, link_bot)
+    if not link_bot:
+        raise BypassFailed("Open link button didn't reveal a bot to continue with")
+    base_f = await _last_id(client, link_bot)
     return link_bot, base_f
 
 
@@ -345,69 +350,140 @@ async def process_post(client, cfg, msg, worker_name=None):
     bot.py — stages then go to state.workers[name] instead of the global
     state.stage so parallel workers don't clobber each other."""
     target, bypass, dbc = cfg["target_id"], cfg.get("bypass_id"), cfg["db_id"]
+    link_mode = cfg.get("link_mode") or "button"          # v42
+    link_trigger = cfg.get("link_trigger")                # v42
 
-    # LINK_BOT is DISCOVERED from THIS post's Download button (per target).
-    # The env-var FUBUKI_BOT stays only as a last-resort fallback for weird
-    # posts where the button isn't a t.me deep link.
-    link_bot = _peek_link_bot(msg) or FUBUKI_BOT
-    if not link_bot:
-        raise RuntimeError(
-            "Download button carries no t.me/<bot>?start=... link and no "
-            "FUBUKI_BOT fallback is set — cannot determine LINK_BOT for this post")
-    log.info("post %s: LINK_BOT=@%s (from Download button)", msg.id, link_bot)
-
-    # 1) click Download on the target post — WITH its start payload, so LINK_BOT
-    #    serves the linked content instead of its generic welcome message
-    state.stage = f"clicking Download (LINK_BOT=@{link_bot})"
-    base_f = await _last_id(client, link_bot)
-    _, _, followed_bot = await _follow_button(msg, BTN_DOWNLOAD, client)
-    if followed_bot and followed_bot != link_bot:
-        # button URL parsed differently than the peek — trust the follow result
-        link_bot = followed_bot
-        base_f = await _last_id(client, link_bot)
-
-    await asyncio.sleep(STEP_DELAY)
-
-    # 2) LINK_BOT sends the linked message (Short link button) — or a link in
-    #    text; if it answered with the generic welcome, re-send /start once
-    state.stage = f"waiting @{link_bot} short-link message"
-    labels = await _link_btn_labels()
-    fm = None
-    for attempt in (1, 2):
-        try:
-            fm = await _wait_new(client, link_bot, base_f, WAIT_BOT_REPLY,
-                                 need_button=labels)
-        except TimeoutError:
-            try:
-                fm = await _wait_new(client, link_bot, base_f, 10, need_text="http")
-            except TimeoutError:
-                fm = None  # welcome-only round -> fall through to the retry nudge
-        if fm:
-            break
-        if attempt == 1:
-            await client.send_message(link_bot, "/start")  # nudge after welcome
+    if link_mode == "caption":
+        # v42: the download URL is an EMBEDDED hyperlink inside the caption
+        # text (no inline button at all). The exact trigger text carries a
+        # hidden URL (MessageEntityTextUrl). Two forms are handled:
+        #  - t.me/<LINK_BOT>?start=<payload>  -> same deep-link path as a
+        #    Download button: /start the bot and pull the Short link message;
+        #  - any other URL                   -> it IS the short link already:
+        #    skip steps 1-3 and go straight to the bypass chain.
+        link_bot = None
+        if not link_trigger:
+            raise RuntimeError("target link_mode is 'caption' but no trigger text is "
+                               "configured — set it with /targatelinkmode <n> caption <text>")
+        cap_url = find_caption_url(msg, link_trigger)
+        if not cap_url:
+            raise RuntimeError(f"caption trigger {link_trigger!r} carries no embedded link "
+                               f"in post {msg.id} (rename? update /targatelinkmode)")
+        log.info("post %s: caption link found behind %r -> %s", msg.id, link_trigger, cap_url)
+        cb, payload = parse_tg_start(cap_url)
+        if cb:
+            link_bot = cb
+            await _stage(worker_name, f"opening caption deep link (LINK_BOT=@{link_bot})")
             base_f = await _last_id(client, link_bot)
-    if not fm:
-        raise RuntimeError(
-            f"@{link_bot} sent neither a link button nor a link "
-            f"(wanted one of {labels} — add the new label with /linkbutton)")
+            await client.send_message(link_bot, f"/start {payload}" if payload else "/start")
+            await asyncio.sleep(STEP_DELAY)
+            # 2/3) identical to button mode — LINK_BOT replies with the Short
+            #      link message; activate it / take the link from the text
+            await _stage(worker_name, f"waiting @{link_bot} short-link message")
+            labels = await _link_btn_labels()
+            fm = None
+            for attempt in (1, 2):
+                try:
+                    fm = await _wait_new(client, link_bot, base_f, WAIT_BOT_REPLY,
+                                         need_button=labels)
+                except TimeoutError:
+                    try:
+                        fm = await _wait_new(client, link_bot, base_f, 10,
+                                             need_text="http")
+                    except TimeoutError:
+                        fm = None  # welcome-only round -> retry nudge
+                if fm:
+                    break
+                if attempt == 1:
+                    await client.send_message(link_bot, "/start")
+                    base_f = await _last_id(client, link_bot)
+            if not fm:
+                raise RuntimeError(
+                    f"@{link_bot} sent neither a link button nor a link "
+                    f"(wanted one of {labels} — add the new label with /linkbutton)")
+            await _stage(worker_name, "getting short link")
+            short_link = first_url(fm.text or "")
+            if not short_link:
+                res, b, _ = await _follow_button(fm, labels, client)
+                short_link = getattr(b, "url", None) or (
+                    res if isinstance(res, str) and "http" in res else None)
+            if not short_link:
+                lm = await _wait_new(client, link_bot,
+                                     await _last_id(client, link_bot),
+                                     WAIT_BOT_REPLY, need_text="http")
+                short_link = first_url(lm.text)
+            if not short_link:
+                raise RuntimeError("could not capture short link")
+        else:
+            short_link = cap_url
+            log.info("post %s: caption link is the short link itself (no LINK_BOT hop)",
+                     msg.id)
+        await asyncio.sleep(STEP_DELAY)
+    else:
+        # LINK_BOT is DISCOVERED from THIS post's Download button (per target).
+        # The env-var FUBUKI_BOT stays only as a last-resort fallback for weird
+        # posts where the button isn't a t.me deep link.
+        link_bot = _peek_link_bot(msg) or FUBUKI_BOT
+        if not link_bot:
+            raise RuntimeError(
+                "Download button carries no t.me/<bot>?start=... link and no "
+                "FUBUKI_BOT fallback is set — cannot determine LINK_BOT for this post")
+        log.info("post %s: LINK_BOT=@%s (from Download button)", msg.id, link_bot)
 
-    # 3) activate 'Short link' (or take the link straight from the text)
-    state.stage = "getting short link"
-    short_link = first_url(fm.text or "")
-    if not short_link:
-        res, b, _ = await _follow_button(fm, labels, client)
-        short_link = getattr(b, "url", None) or (res if isinstance(res, str) and "http" in res else None)
-    if not short_link:
-        lm = await _wait_new(client, link_bot, await _last_id(client, link_bot),
-                             WAIT_BOT_REPLY, need_text="http")
-        short_link = first_url(lm.text)
-    if not short_link:
-        raise RuntimeError("could not capture short link")
+        # 1) click Download on the target post — WITH its start payload, so LINK_BOT
+        #    serves the linked content instead of its generic welcome message
+        state.stage = f"clicking Download (LINK_BOT=@{link_bot})"
+        base_f = await _last_id(client, link_bot)
+        _, _, followed_bot = await _follow_button(msg, BTN_DOWNLOAD, client)
+        if followed_bot and followed_bot != link_bot:
+            # button URL parsed differently than the peek — trust the follow result
+            link_bot = followed_bot
+            base_f = await _last_id(client, link_bot)
 
-    await asyncio.sleep(STEP_DELAY)
+        await asyncio.sleep(STEP_DELAY)
 
-    # 4) v39: bypass ROUTING + RETRY + ALERT. The short link's domain picks
+        # 2) LINK_BOT sends the linked message (Short link button) — or a link in
+        #    text; if it answered with the generic welcome, re-send /start once
+        state.stage = f"waiting @{link_bot} short-link message"
+        labels = await _link_btn_labels()
+        fm = None
+        for attempt in (1, 2):
+            try:
+                fm = await _wait_new(client, link_bot, base_f, WAIT_BOT_REPLY,
+                                     need_button=labels)
+            except TimeoutError:
+                try:
+                    fm = await _wait_new(client, link_bot, base_f, 10, need_text="http")
+                except TimeoutError:
+                    fm = None  # welcome-only round -> fall through to the retry nudge
+            if fm:
+                break
+            if attempt == 1:
+                await client.send_message(link_bot, "/start")  # nudge after welcome
+                base_f = await _last_id(client, link_bot)
+        if not fm:
+            raise RuntimeError(
+                f"@{link_bot} sent neither a link button nor a link "
+                f"(wanted one of {labels} — add the new label with /linkbutton)")
+
+        # 3) activate 'Short link' (or take the link straight from the text)
+        state.stage = "getting short link"
+        short_link = first_url(fm.text or "")
+        if not short_link:
+            res, b, _ = await _follow_button(fm, labels, client)
+            short_link = getattr(b, "url", None) or (res if isinstance(res, str) and "http" in res else None)
+        if not short_link:
+            lm = await _wait_new(client, link_bot, await _last_id(client, link_bot),
+                                 WAIT_BOT_REPLY, need_text="http")
+            short_link = first_url(lm.text)
+        if not short_link:
+            raise RuntimeError("could not capture short link")
+
+        await asyncio.sleep(STEP_DELAY)
+
+    # 4) v39: bypass ROUTING + RETRY + ALERT. (v42 caption mode lands here
+    #    too — link_bot may be None if the caption held the short link itself,
+    #    which the bypass result resolves below.) The short link's domain picks
     #    its endpoint: a /domainbypass rule sends it ONLY to that bot; every
     #    other link tries each pool bot (/bypass + /addbypass) in order, then
     #    /altbypass as the last resort. Each endpoint gets 2 attempts; a 2nd
@@ -447,6 +523,17 @@ async def process_post(client, cfg, msg, worker_name=None):
     # the document list or every video gets sent twice (vid1,vid1,vid2,vid2)
     vids = [m for m in media if is_video_msg(m)]
     srts = [m for m in media if is_srt_msg(m)]
+    # v42: /keepimages OFF — discard EVERY image the media bot sent (photos
+    # and image-mime documents, with or without caption) before building
+    # `other`; nothing is forwarded to the DB. Default ON = original behavior.
+    keep_images = await DB.get_keep_images()
+    if not keep_images:
+        dropped = [m for m in media
+                   if not is_video_msg(m) and not is_srt_msg(m) and is_image_msg(m)]
+        if dropped:
+            media = [m for m in media if m not in dropped]
+            log.info("post %s: /keepimages OFF — discarded %d image(s) from @%s",
+                     msg.id, len(dropped), bot)
     # v32: skip EVERY image-with-caption the media bot sends. Target bots echo
     # the cover image (and sometimes extra image cards) with captions — the
     # real cover post is already delivered from the TARGET channel by

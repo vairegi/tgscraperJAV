@@ -23,6 +23,9 @@ video attributes (duration, thumbnail, filename, streaming, spoiler) are
 preserved because the same server-side file reference is reused."""
 import asyncio
 import logging
+import mimetypes
+import os
+import tempfile
 
 from telethon.errors import (FileReferenceExpiredError, MediaInvalidError,
                              MediaEmptyError)  # v39.2: MediaEmptyError = unusable ref too
@@ -140,7 +143,39 @@ async def _send_one(client, dbc, msg, source, caption=None, buttons=None):
 
 async def send_cover(client, target, msg, dbc):
     """Cover post from the target channel: same image (spoiler kept), same
-    caption, same buttons — as a fresh message, no forward tag, no download."""
+    caption, same buttons — as a fresh message, no forward tag, no download.
+
+    v42: RESTRICTED targets (msg.noforwards — the channel's 'Restrict saving
+    content' flag) block copy-by-reference: the file reference can't be
+    re-sent outside the channel. Workaround: DOWNLOAD the cover to a temp
+    file, UPLOAD it to the DB channel as a brand-new message with the exact
+    same caption/buttons, and DELETE the temp file immediately afterwards —
+    on success AND on failure — so Render's small disk never fills up. The
+    new DB post is a fresh userbot post (not restricted), so the DB2 clean
+    mirror keeps working on it normally."""
+    if getattr(msg, "noforwards", False) and getattr(msg, "media", None) is not None:
+        ext = ".jpg"  # Telegram photos are jpeg; documents keep their own type
+        doc = getattr(msg, "document", None)
+        if doc is not None:
+            ext = (mimetypes.guess_extension(
+                (getattr(doc, "mime_type", "") or "").split(";")[0].strip()) or "")
+        tmp = tempfile.mktemp(prefix="tgscraper_cover_", suffix=ext)
+        try:
+            got = await client.download_media(msg, file=tmp)
+            if not got:
+                raise RuntimeError("restricted cover download returned nothing")
+            r = await client.send_file(dbc, got, caption=msg.message or "",
+                                       buttons=msg.buttons, spoiler=_spoiler(msg))
+            log.info("restricted target %s: cover re-uploaded as new DB msg %s",
+                     target, getattr(r, "id", "?"))
+            return
+        finally:
+            # disk hygiene: the temp file goes away even if upload failed
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
     await _send_one(client, dbc, msg, target,
                     caption=msg.message or "", buttons=msg.buttons)
 

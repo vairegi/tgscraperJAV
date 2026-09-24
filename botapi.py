@@ -45,6 +45,8 @@ _CMDS = [
     ("deldomain","Remove a domain rule: /deldomain <n>"),
     ("altbypass","Last-resort fallback bypass — tried after every pool bot fails"),
     ("linkbutton", "List or add LINK_BOT button labels (no restart)"),
+    ("targatelinkmode", "v42: target link mode: /targatelinkmode <n> button|caption [text]"),
+    ("keepimages", "v42: collect media-bot images too: /keepimages on|off (global)"),
     ("removelinkbutton", "Remove a LINK_BOT button label by number"),
     ("goto",     "Set a target's start message (/goto <n> <msg> or link)"),
     ("reset",    "Reset a target's progress to post 1"),
@@ -303,7 +305,10 @@ async def _build_board_rows(client):
     return rows
 
 
-async def _add_target_with_db(scrape_client, ev, tid, dbid, db2=None):
+async def _add_target_with_db(scrape_client, ev, tid, dbid, db2=None,
+                              link_mode="button", link_trigger=None):
+    """v42: link_mode 'button' (default) or 'caption' + the exact trigger text
+    that holds the hidden caption hyperlink."""
     try:
         ent_t = await scrape_client.get_entity(tid)
     except Exception as e:
@@ -320,7 +325,7 @@ async def _add_target_with_db(scrape_client, ev, tid, dbid, db2=None):
     if not _entity_ok(ent_d, "channel"):
         await ev.reply(_not_a_channel_msg(dbid, "channel"))
         return
-    await DB.add_target(tid, dbid)
+    await DB.add_target(tid, dbid, link_mode, link_trigger)
     if db2 is not None:
         try:
             ent2 = await scrape_client.get_entity(db2)
@@ -334,6 +339,9 @@ async def _add_target_with_db(scrape_client, ev, tid, dbid, db2=None):
     await ev.reply(f"✅ Target saved:\n  {tid} → DB {dbid}"
                    + (f" → DB2 {db2} (bot clean-mirror ON — make sure the BOT is admin in DB and DB2)"
                       if db2 is not None else "")
+                   + (f"\n  Link mode: CAPTION — trigger text: `{link_trigger}`"
+                      if link_mode == "caption"
+                      else "\n  Link mode: BUTTON (Download button)")
                    + "\n\n/targets to view all, /start to scrape.")
 
 
@@ -353,11 +361,12 @@ def register(scrape_client, sm=None):
             ("ℹ️ INFO", ["help", "ping", "checkram", "stats"]),
             ("👑 ADMINS", ["addadmin", "removeadmin"]),
             ("🎯 TARGETS & DB", ["target", "targets", "targets_text", "deltarget",
-                                       "setdb", "adddb", "setdb2"]),
+                                       "setdb", "adddb", "setdb2", "targatelinkmode"]),
             ("🔐 BYPASS", ["bypass", "addbypass", "removebypass", "bypasslist",
                                  "domainbypass", "deldomain", "altbypass"]),
             ("🧼 DB2 TEXT CLEANING", ["avoid", "removegavoid", "replaceword",
-                                           "removereplace", "avoidtext", "removeavoid"]),
+                                           "removereplace", "avoidtext", "removeavoid",
+                                           "keepimages"]),
             ("👥 USERBOTS", ["invite", "leave", "add", "checkdm"]),
             ("🔘 LINK-BOT BUTTONS", ["linkbutton", "removelinkbutton"]),
             ("▶️ SCRAPING", ["start", "pause", "resume", "stop", "skip", "cancel"]),
@@ -1481,6 +1490,58 @@ def register(scrape_client, sm=None):
         await DB.set_target_db(t["id"], dbid)
         await ev.reply(f"✅ Target {t['id']} now posts to DB {dbid}")
 
+    # ---------- v42: per-target link mode (button vs caption hyperlink) ----------
+    @bot.on(events.NewMessage(pattern=r"^/targatelinkmode(?:\s+([\s\S]+))?$"))
+    async def targatelinkmode_cmd(ev):
+        """Change how a target's download link is found, without re-adding it:
+        /targatelinkmode <n> button | /targatelinkmode <n> caption <trigger text>"""
+        if not await _admin(ev.sender_id):
+            return
+        targets = await DB.get_targets()
+        if not targets:
+            await ev.reply("No target channels. Add one with /target")
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        parts = arg.split(None, 2)
+        if (len(parts) < 2 or not parts[0].isdigit()
+                or not (1 <= int(parts[0]) <= len(targets))
+                or parts[1].lower() not in ("button", "caption")
+                or (parts[1].lower() == "caption" and (len(parts) < 3 or not parts[2].strip()))):
+            lines = ["Usage:\n  /targatelinkmode <n> button"
+                     "\n  /targatelinkmode <n> caption <trigger text>\n"]
+            for i, t in enumerate(targets):
+                mode = t.get("link_mode") or "button"
+                lines.append(f"  {i+1}. `{t['id']}` — mode: **{mode}**"
+                             + (f", trigger: `{t.get('link_trigger')}`"
+                                if mode == "caption" else ""))
+            await ev.reply("\n".join(lines))
+            return
+        t = targets[int(parts[0]) - 1]
+        mode = parts[1].lower()
+        trigger = parts[2].strip() if mode == "caption" else None
+        await DB.set_target_link_mode(t["id"], mode, trigger)
+        await ev.reply(f"✅ Target {int(parts[0])} link mode = **{mode.upper()}**"
+                       + (f" — trigger text: `{trigger}`" if trigger else ""))
+
+    # ---------- v42: media-bot image collection switch ----------
+    @bot.on(events.NewMessage(pattern=r"^/keepimages(?:\s+(\S+))?$"))
+    async def keepimages_cmd(ev):
+        """GLOBAL switch: OFF = images from the media bot are discarded before
+        DB delivery (videos/.srt/text are never touched). Default ON."""
+        if not await _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip().lower()
+        if arg in ("on", "off"):
+            await DB.set_keep_images(arg == "on")
+            await ev.reply("✅ Images from the media bot will now be "
+                           + ("COLLECTED and forwarded to the DB (like videos)."
+                              if arg == "on" else
+                              "DISCARDED — only videos/.srt/text are forwarded to the DB."))
+            return
+        cur = await DB.get_keep_images()
+        await ev.reply(f"🖼 keepimages is currently **{'ON' if cur else 'OFF'}** "
+                       "(global, all targets).\nUsage: /keepimages on|off")
+
     @bot.on(events.NewMessage(pattern=r"^/cancel$"))
     async def cancel(ev):
         _pending.pop(ev.sender_id, None)
@@ -1515,11 +1576,39 @@ def register(scrape_client, sm=None):
                            "Cancel: /cancel")
             return
         if kind == "target_db2":
-            _pending.pop(ev.sender_id, None)
             tid, dbid = extra
             raw = ev.raw_text.strip().lower()
             db2 = None if raw in ("skip", "-", "none", "off", "0") else _parse_chat_id(ev.raw_text)
-            await _add_target_with_db(scrape_client, ev, tid, dbid, db2)
+            # v42: next wizard step — WHERE does the download link live?
+            _pending[ev.sender_id] = ("target_mode", (tid, dbid, db2))
+            await ev.reply("Is the download link in a **Button** or in the **Caption**?\n"
+                           "• `button` — the post has an inline Download button (default)\n"
+                           "• `caption` — the URL is a hidden hyperlink behind a text in the caption\n"
+                           "Cancel: /cancel")
+            return
+        if kind == "target_mode":  # v42
+            tid, dbid, db2 = extra
+            raw = ev.raw_text.strip().lower()
+            if raw.startswith("c"):
+                _pending[ev.sender_id] = ("target_trigger", (tid, dbid, db2))
+                await ev.reply("Caption mode — send the EXACT text that holds the hidden "
+                               "hyperlink (e.g. `Download Here`). It is matched exactly "
+                               "(fancy Unicode fonts like 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱 are folded, so plain "
+                               "text is fine).\nCancel: /cancel")
+            else:
+                _pending.pop(ev.sender_id, None)
+                await _add_target_with_db(scrape_client, ev, tid, dbid, db2,
+                                          "button", None)
+            return
+        if kind == "target_trigger":  # v42
+            _pending.pop(ev.sender_id, None)
+            tid, dbid, db2 = extra
+            trigger = ev.raw_text.strip()
+            if not trigger:
+                await ev.reply("⚠️ Trigger text can't be empty — run /target again.")
+                return
+            await _add_target_with_db(scrape_client, ev, tid, dbid, db2,
+                                      "caption", trigger)
             return
         if kind == "deltarget":
             _pending.pop(ev.sender_id, None)

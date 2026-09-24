@@ -14,6 +14,9 @@ Board features (v38):
     (editMessageText with rich_message) instead of cluttering the chat.
   * Board expiry — buttons stop working after BOARD_TTL seconds; a late tap
     gets a popup "This board has expired. Run /targets to open a fresh board."
+    v42: TTL raised to 30 minutes, and generating a NEW board instantly
+    invalidates the chat's PREVIOUS board — a tap on an older, scrolled-up
+    board answers with the expired popup and changes nothing (no stale state).
   * Linked cells everywhere — target titles link to their last scraped post
     (t.me/c/…), DB/DB2 use cached invite links.
 
@@ -38,7 +41,7 @@ log = logging.getLogger("richboard")
 _API = "https://api.telegram.org/bot{tok}/{method}"
 _TIMEOUT = aiohttp.ClientTimeout(total=20)
 
-BOARD_TTL = 150          # seconds before board buttons expire (2.5 min)
+BOARD_TTL = 1800         # v42: seconds before board buttons expire (30 min)
 
 CB_PREFIX = "tglp:"          # callback namespace for this module
 CB_REFRESH = CB_PREFIX + "refresh"
@@ -210,8 +213,20 @@ def board_expired(chat_id, message_id=None, ts=None):
 
 
 def mark_board(chat_id, message_id):
-    """Record the live board id/timestamp (used for in-place edits + expiry)."""
+    """Record the live board id/timestamp (used for in-place edits + expiry).
+    v42: generating a NEW board INVALIDATES the chat's previous board — its
+    timestamp is zeroed (NOT deleted: deleting would make board_expired fall
+    through to the live-board check and wrongly allow the stale tap), so
+    buttons on an older, scrolled-up board get the expired popup and do
+    nothing. In-place edits (Refresh/toggle) pass the SAME message id and are
+    never invalidated."""
     ts = time.monotonic()
+    prev = _BOARDS.get(chat_id)
+    if (prev and prev.get("msg_id") is not None
+            and message_id is not None and prev["msg_id"] != message_id):
+        _BOARD_TS[prev["msg_id"]] = 0.0      # previous board -> instantly expired
+        log.info("board invalidated: chat %s old msg %s (new board %s)",
+                 chat_id, prev["msg_id"], message_id)
     _BOARDS[chat_id] = {"msg_id": message_id, "ts": ts}
     if message_id is not None:
         _BOARD_TS[message_id] = ts

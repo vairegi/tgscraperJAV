@@ -171,7 +171,8 @@ async def _parallel_pass(sm, target, cfg, last_id, pass_gen):
             return
         if state.reset_gen != pass_gen or target in state.paused_ids:
             return
-        if not is_post(msg):
+        if not is_post(msg, cfg.get("link_mode", "button"),  # v42
+                       cfg.get("link_trigger")):
             collected.append((msg.id, False, None))
         else:
             log.info("POST FOUND: msg %s — queued for a parallel worker", msg.id)
@@ -300,6 +301,10 @@ async def scrape_loop(sm):
         cfg = dict(cfg)
         cfg["target_id"] = target
         cfg["db_id"] = tsel.get("db_id") or cfg.get("db_id")  # per-target DB wins
+        # v42: per-target download-link discovery — 'button' (default) or
+        # 'caption' (hidden hyperlink behind cfg["link_trigger"] text)
+        cfg["link_mode"] = tsel.get("link_mode") or "button"
+        cfg["link_trigger"] = tsel.get("link_trigger")
         pass_gen = state.reset_gen
         if len(targets) > 1:
             log.info("multi-target: %d channels, working on %s -> DB %s", len(targets), target, cfg["db_id"])
@@ -333,8 +338,11 @@ async def scrape_loop(sm):
                     # abandon this pass and move to a still-active target
                     log.info("target %s paused via /pause <n> — moving to next target", target)
                     break
-                if not is_post(msg):
-                    log.info("skip msg %s (%s)", msg.id, why_not_post(msg))
+                if not is_post(msg, cfg.get("link_mode", "button"),  # v42
+                               cfg.get("link_trigger")):
+                    log.info("skip msg %s (%s)", msg.id,
+                             why_not_post(msg, cfg.get("link_mode", "button"),
+                                          cfg.get("link_trigger")))
                     await DB.set_progress(target, msg.id)
                     continue
                 log.info("POST FOUND: msg %s — starting download flow", msg.id)

@@ -67,6 +67,13 @@ Each target's LINK_BOT is discovered per-post from the Download button's own `t.
 | `/setdb2 <n> <id\|off>` | set/clear a target's DB2 clean-mirror channel |
 | `/avoidtext [n] ["text"]` | DB2: list or add a credit string to strip from mirrored captions |
 | `/removeavoid <n> <#>` | remove an avoid string |
+| `/targatelinkmode <n> button\|caption [text]` | **v42** change how target n's download link is found — inline Download button, or a hidden hyperlink behind the exact caption trigger text |
+| `/keepimages on\|off` | **v42** GLOBAL switch (default ON): OFF = every image the media bot sends is discarded; only videos/.srt/text reach the DB |
+
+## v42 updates
+- **Caption download links:** the `/target` wizard now asks (after DB/DB2) "Is the download link in a Button or in the Caption?". Caption mode asks for the EXACT text holding the hidden hyperlink and stores mode + trigger per target in MongoDB. Scraping that target extracts the embedded URL (`MessageEntityTextUrl`, exact Unicode-folded match — 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱 𝗛𝗲𝗿𝗲 == "Download Here") instead of looking for a Download button: a `t.me/<bot>?start=…` caption link continues through the normal LINK_BOT → Short-link → bypass chain, while any other URL is treated as the short link itself and goes straight to bypass. Change the mode later with `/targatelinkmode` (progress is kept).
+- **Restricted targets** ("Restrict saving content" / `noforwards`): the cover post can't be copied by reference, so the userbot downloads the cover image, re-uploads it to the DB channel as a NEW message with the exact original caption/buttons, and deletes the temp file immediately after (on success AND on failure). Videos/.srt collected from the media bot are unaffected, and the fresh DB cover mirrors to DB2 normally.
+- **`/targets` board:** button TTL raised from 150s to 30 minutes, and sending a NEW board instantly expires the chat's previous board — buttons on older scrolled-up boards show the "board expired" popup and change nothing.
 
 ## DB2 clean mirror (bot-powered)
 Each target can have a second **DB2** channel (set in the `/target` wizard — it

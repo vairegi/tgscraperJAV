@@ -33,13 +33,19 @@ async def get_targets():
         if isinstance(t, dict):
             out.append({"id": t.get("id") or t.get("target_id"), "db_id": t.get("db_id"),
                         "paused": bool(t.get("paused", False)),
-                        "db2_id": t.get("db2_id"), "avoid": list(t.get("avoid") or [])})
+                        "db2_id": t.get("db2_id"), "avoid": list(t.get("avoid") or []),
+                        # v42: link discovery mode — existing docs migrate to the
+                        # button default automatically, no redeploy needed
+                        "link_mode": (t.get("link_mode") or "button"),
+                        "link_trigger": t.get("link_trigger")})
         else:
-            out.append({"id": t, "db_id": None, "paused": False, "db2_id": None, "avoid": []})
+            out.append({"id": t, "db_id": None, "paused": False, "db2_id": None,
+                        "avoid": [], "link_mode": "button", "link_trigger": None})
     out = [t for t in out if t["id"] is not None]
     if not out and doc.get("target_id"):
         out = [{"id": doc["target_id"], "db_id": doc.get("db_id"), "paused": False,
-                "db2_id": None, "avoid": []}]
+                "db2_id": None, "avoid": [], "link_mode": "button",
+                "link_trigger": None}]
     return out
 
 async def _save_targets(targets):
@@ -49,14 +55,21 @@ async def _save_targets(targets):
                   "target_id": targets[0]["id"] if targets else None}}, upsert=True)
     return targets
 
-async def add_target(tid, db_id=None):
+async def add_target(tid, db_id=None, link_mode="button", link_trigger=None):
+    """v42: link_mode 'button' (default, inline Download button) or 'caption'
+    (hidden hyperlink behind the exact link_trigger caption text)."""
     targets = await get_targets()
     for t in targets:
         if t["id"] == tid:
             if db_id is not None:
                 t["db_id"] = db_id
+            if link_mode:
+                t["link_mode"] = link_mode
+                t["link_trigger"] = link_trigger if link_mode == "caption" else None
             return await _save_targets(targets)
-    targets.append({"id": tid, "db_id": db_id, "db2_id": None, "avoid": []})
+    targets.append({"id": tid, "db_id": db_id, "db2_id": None, "avoid": [],
+                    "link_mode": link_mode or "button",
+                    "link_trigger": link_trigger if link_mode == "caption" else None})
     return await _save_targets(targets)
 
 async def remove_target(tid):
@@ -79,6 +92,18 @@ async def set_target_db2(tid, db2_id):
     for t in targets:
         if t["id"] == tid:
             t["db2_id"] = db2_id
+            return await _save_targets(targets)
+    return None  # target not found
+
+async def set_target_link_mode(tid, mode, trigger=None):
+    """v42: change HOW a target's download link is found — 'button' (inline
+    Download button) or 'caption' (hidden hyperlink behind the exact trigger
+    text in the caption). Returns the updated list, None if unknown."""
+    targets = await get_targets()
+    for t in targets:
+        if t["id"] == tid:
+            t["link_mode"] = mode
+            t["link_trigger"] = trigger if mode == "caption" else None
             return await _save_targets(targets)
     return None  # target not found
 
@@ -297,6 +322,19 @@ async def remove_replace_word(n):
     removed = pairs.pop(n - 1)
     await set_config("replace_words", pairs)
     return pairs, removed
+
+# ---------------- v42: media-bot image collection switch ----------------
+# GLOBAL flag (/keepimages on|off in the control bot): when OFF, images the
+# media bot sends are discarded in flow.py before DB delivery. Default ON so
+# pre-v42 behavior (images collected alongside videos) is preserved when the
+# flag has never been set.
+
+async def get_keep_images():
+    v = await get_config("keep_images")
+    return True if v is None else bool(v)
+
+async def set_keep_images(on):
+    await set_config("keep_images", bool(on))
 
 # ---------------- progress (per target id) ----------------
 
