@@ -12,6 +12,7 @@ from scraper import is_post, why_not_post
 from flow import process_post, state, Abort
 import commands, db as DB
 import botapi
+import dedup  # v45: DB2 duplicate-skip gate
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("tgscraper")
@@ -120,6 +121,9 @@ async def _parallel_one(client, cfg, msg, idx, name, resolved):
         msg = fresh
         await process_post(client, cfg, msg, worker_name=name)
         resolved.add(msg.id)
+        # v45: auto-grow — this cover is now archived in DB2, so a future
+        # repost is gated WITHOUT re-scanning DB2
+        await dedup.note_scraped(cfg["target_id"], msg.message or "", msg.id)
         log.info("post %s done (%s, parallel)", msg.id, name)
     except Abort:
         await DB.add_failure(msg.id, state.workers.get(name, "?"), "skipped by user")
@@ -175,9 +179,20 @@ async def _parallel_pass(sm, target, cfg, last_id, pass_gen):
                        cfg.get("link_trigger")):
             collected.append((msg.id, False, None))
         else:
-            log.info("POST FOUND: msg %s — queued for a parallel worker", msg.id)
-            collected.append((msg.id, True, msg))
-            pending.append(msg)
+            # v45: DB2 duplicate gate — a cover already archived in DB2
+            # skips the WHOLE chain (Download click, bypass, DB bundle +
+            # DB2 mirror). Marked non-post so the watermark advances.
+            _dup = await dedup.already_indexed(target, msg.message or "")
+            if _dup:
+                _mfp, _score = _dup
+                log.info("DUP SKIP: msg %s already in DB2 (%.1f%% match) — not scraped",
+                         msg.id, _score)
+                await dedup.record_skip(target, msg.id, _score, _mfp)
+                collected.append((msg.id, False, None))
+            else:
+                log.info("POST FOUND: msg %s — queued for a parallel worker", msg.id)
+                collected.append((msg.id, True, msg))
+                pending.append(msg)
         if len(collected) >= 500 or len(pending) >= 200:
             break  # bound one pass; the next pass continues from the watermark
     if not pending:
@@ -345,6 +360,16 @@ async def scrape_loop(sm):
                                           cfg.get("link_trigger")))
                     await DB.set_progress(target, msg.id)
                     continue
+                # v45: DB2 duplicate gate (sequential path) — same as the
+                # parallel gate above; progress advances like a normal skip
+                _dup = await dedup.already_indexed(target, msg.message or "")
+                if _dup:
+                    _mfp, _score = _dup
+                    log.info("DUP SKIP: msg %s already in DB2 (%.1f%% match) — progress advanced",
+                             msg.id, _score)
+                    await dedup.record_skip(target, msg.id, _score, _mfp)
+                    await DB.set_progress(target, msg.id)
+                    continue
                 log.info("POST FOUND: msg %s — starting download flow", msg.id)
                 state.current_post = msg.id
                 try:
@@ -360,6 +385,7 @@ async def scrape_loop(sm):
                     # correct id is used. iter_messages(min_id=id) is exclusive, so
                     # the completed post is not reprocessed and the next post is
                     # not skipped.
+                    await dedup.note_scraped(target, msg.message or "", msg.id)  # v45 auto-grow
                     await DB.set_progress(target, msg.id)
                     posts_on_account += 1
                     log.info("post %s done (%s, %d/%d on this account)", msg.id,

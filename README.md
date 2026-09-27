@@ -154,3 +154,14 @@ Each captured short link's **domain** picks its bypass bot: a `/domainbypass` ru
 
 ## Multi-session later
 `session_manager.py` already round-robins — add more StringSessions to scale.
+
+## Duplicate protection (v45)
+
+Before a post's download chain even starts, the scraper checks its COVER caption against a fingerprint index built from the target's **DB2** channel (DB2 captions are the clean, credit-stripped copies):
+
+* **Fingerprint** — the story paragraph only (everything before the first `➪ Episode:-` metadata bullet; metadata-keyword lines also cut when the bullet is absent), NFKD-folded so 𝗯𝗼𝗹𝗱/𝘪𝘵𝘢𝘭𝘪𝘤/mono/fancy fonts collapse to plain text, URLs and @mentions stripped, tokens <3 chars and pure numbers dropped.
+* **Match** — exact fingerprint hit, else rapidfuzz `token_set_ratio >= 90`. A match SKIPS the whole post (no Download click, no bypass, no DB/DB2 bundle) and advances progress like a normal skip.
+* **One scan, ever** — built automatically in the background when you /target (or /setdb2) a channel with DB2, cached in MongoDB + RAM. /pause, /resume and restarts NEVER re-scan. `/dupescan <n>` forces a rebuild (e.g. after mass-editing DB2 captions). Bare `/dupescan` lists per-target index sizes.
+* **Auto-grows** — every successfully scraped cover is added to the index, so a repost of a NEW post is caught later with zero DB2 re-scanning.
+* **Per-target** — targets sharing one DB2 each load their own copy of the same fingerprints, so a cover already in the shared DB2 is skipped for BOTH targets.
+* **Notifications** — skips are DM'd in batches of 10 per target, plus a mandatory flush when that target is paused (bare /pause flushes all); /status shows the per-target dupe counter.

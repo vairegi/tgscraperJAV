@@ -87,3 +87,40 @@ DRAG onto the repo root: botapi.py, README_PATCH.txt (everything else unchanged)
 TESTING: py_compile PASS on botapi.py; role-check and numbering logic match
 patterns already proven in v38–v40.
 ================================================================================
+
+================================================================================
+README_PATCH — v45: DB2 duplicate-skip gate (fingerprint index + /dupescan)
+================================================================================
+
+DRAG onto the repo root: dedup.py (NEW), bot.py, botapi.py, requirements.txt,
+README.md, README_PATCH.txt (everything else unchanged).
+
+1) NEW MODULE dedup.py — fingerprint_cover() (story-only head up to the
+   first ➪ metadata bullet, NFKD font fold so bold/quote/mono/fancy captions
+   match their clean DB2 twins, URL/@mention strip, >=3-char tokens), Mongo
+   collections cover_fp (per-target index, $slice-capped at 20000) and
+   db2_cover_index (scan watermark), rapidfuzz token_set_ratio >= 90 matching
+   with an exact-equality fast path, batched skip DMs (10 per target or on
+   /pause), auto-grow after every successful scrape. The gate NEVER raises —
+   a fingerprint error means "scrape normally", never a blocked post.
+2) GATE in bot.py — both the sequential loop and the v39 parallel dispatcher
+   call dedup.already_indexed() right after is_post(); a duplicate cover
+   short-circuits the ENTIRE chain (no Download click, no bypass, no DB/DB2
+   bundle) and advances progress exactly like a normal non-post skip.
+3) ONE-TIME AUTO SCAN — the /target wizard and /setdb2 fire
+   dedup.scan_db2_bg(): DB2 history is read ONCE by the USERBOT (bot
+   accounts are blocked from GetHistoryRequest), cover posts only (m.photo
+   gate — same rule as /scan4duplicates), fingerprints stored in Mongo and
+   cached in RAM. /pause, /resume, /goto and restarts NEVER re-scan.
+   /dupescan <n> forces a rebuild.
+4) requirements.txt — adds rapidfuzz (dedup falls back to difflib if the
+   wheel is ever missing).
+
+TESTING: py_compile PASS on all 6 files. Mocked sandbox suite: fingerprint
+cut at ➪ / metadata-keyword fallback / fancy-font NFKD fold / URL+mention
+strip / empty-caption pass-through, exact + fuzzy >=90 matching,
+below-threshold pass-through, $ne-dedup push, cover-only scan filtering
+(photos in, videos/.srt/empty captions out), cached rescan no-op,
+batch-of-10 DM + on-pause flush, gate-never-raises. NO live Telegram calls —
+validate one real duplicate post on a test target after deploy.
+================================================================================

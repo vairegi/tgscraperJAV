@@ -20,6 +20,7 @@ import time
 import random
 import db as DB
 import mtprotomgr as MTM
+import dedup  # v45: DB2 duplicate-skip index
 import richboard
 from flow import state
 from telethon.tl.types import Channel, Chat, User
@@ -53,6 +54,7 @@ _CMDS = [
     ("reset",    "Reset a target's progress to post 1"),
     ("lastpost", "Newest post in a target channel"),
     ("scan4duplicates", "v43.3: find duplicate COVER posts in a DB2 channel (story-only fuzzy match)"),
+    ("dupescan", "v45: rebuild a target's DB2 duplicate-skip index: /dupescan <n>"),
     ("start",    "Start scraping"),
     ("pause",    "Pause all (bare or /pause all), or one: /pause 2"),
     ("resume",   "Resume all (bare or /resume all), or one: /resume 2"),
@@ -283,6 +285,12 @@ async def _pause_all_targets():
             flipped += 1
         state.paused_ids.add(t["id"])
     state.reset_gen += 1; state._last_scan = None   # drop any in-flight pass
+    # v45: flush every pending duplicate-skip batch so no skip is lost on pause
+    for _t in targets:
+        try:
+            await dedup.flush_skips(_t["id"], reason="all targets paused")
+        except Exception:
+            pass
     return flipped, len(targets)
 
 
@@ -385,6 +393,17 @@ async def _add_target_with_db(scrape_client, ev, tid, dbid, db2=None,
                       if link_mode == "caption"
                       else "\n  Link mode: BUTTON (Download button)")
                    + "\n\n/targets to view all, /start to scrape.")
+    # v45: this target's DB2 holds the clean captions — build its
+    # duplicate-skip index ONCE, in the background (never blocks the reply)
+    if db2 is not None:
+        async def _scan_done(res, _tid=tid):
+            try:
+                await ev.reply(f"🧬 DB2 duplicate-index ready for target {_tid}: "
+                               f"{res.get('count', 0)} cover fingerprint(s) — reposts "
+                               f"will be auto-skipped (≥90% match).")
+            except Exception:
+                pass
+        dedup.scan_db2_bg(scrape_client, tid, db2, done_cb=_scan_done)
 
 
 def register(scrape_client, sm=None):
@@ -411,7 +430,7 @@ def register(scrape_client, sm=None):
             ("▶️ SCRAPING CONTROL", ["start", "pause", "resume", "skip",
                 "stop", "goto", "reset"]),
             ("📊 MONITOR & SCAN", ["status", "current", "progress", "lastpost",
-                "scan4duplicates", "checkram"]),
+                "scan4duplicates", "dupescan", "checkram"]),
             ("🛠️ BULK JOBS", ["replace", "deletetext", "massdlt",
                 "massdlt_status", "massdlt_stop", "forward", "forward_status",
                 "forward_stop", "forward_resume"]),
@@ -820,6 +839,9 @@ def register(scrape_client, sm=None):
         await ev.reply(f"✅ Target {t['id']} now mirrors DB → DB2 {db2} (credits stripped).\n"
                        "Make sure the BOT is admin in the DB channel AND in DB2.\n"
                        "Add credit strings to strip with /avoidtext.")
+        # v45: the target now points at this DB2 — (re)build its
+        # duplicate-skip index once, in the background
+        dedup.scan_db2_bg(scrape_client, t["id"], db2)
 
     @bot.on(events.NewMessage(pattern=r"^/avoidtext(?:\s+([\s\S]+))?$"))
     async def avoidtext_cmd(ev):
@@ -1717,6 +1739,52 @@ def register(scrape_client, sm=None):
             await ev.reply(c)
             await asyncio.sleep(0.5)
 
+    # ---------- v45: DB2 duplicate-skip index ----------
+    @bot.on(events.NewMessage(pattern=r"^/dupescan(?:\s+(\d+))?$"))
+    async def dupescan_cmd(ev):
+        """Manually (re)build a target's duplicate-skip index from its DB2
+        cover posts. Normally NOT needed — /target and /setdb2 trigger it
+        automatically, and every scraped cover is added afterwards. Use this
+        to FORCE a rebuild (e.g. after mass-editing DB2 captions)."""
+        if not await _admin(ev.sender_id):
+            return
+        targets = await DB.get_targets()
+        arg = ev.pattern_match.group(1)
+        if not targets:
+            await ev.reply("No targets set — /target first.")
+            return
+        if not (arg and arg.isdigit() and 1 <= int(arg) <= len(targets)):
+            cur = []
+            for i, t in enumerate(targets):
+                doc = await dedup.get_cover_fp(t["id"])
+                n = len((doc or {}).get("fingerprints") or [])
+                cur.append(f"  {i+1}. {t['id']} → DB2 {t.get('db2_id') or '(off)'}"
+                           f" — {n} fingerprint(s)")
+            await ev.reply("Usage: /dupescan <target #> — rebuild its DB2 duplicate index.\n"
+                           + "\n".join(cur))
+            return
+        t = targets[int(arg) - 1]
+        if not t.get("db2_id"):
+            await ev.reply(f"⚠️ Target {arg} has no DB2 — set one with /setdb2.")
+            return
+        try:
+            await scrape_client.get_entity(t["db2_id"])
+        except Exception as e:
+            await ev.reply(f"⚠️ Can't access DB2 — the USERBOT must be a member "
+                           f"(join it with /invite).\n`{e}`")
+            return
+        dedup.invalidate(t["id"])  # force a fresh rebuild
+        status = await ev.reply(f"🔍 Scanning DB2 {t['db2_id']} for cover-post fingerprints…")
+        try:
+            res = await dedup.scan_db2(scrape_client, t["id"], t["db2_id"])
+            await status.edit(f"✅ Duplicate index rebuilt for target {t['id']}: "
+                              f"{res.get('count', 0)} cover fingerprint(s) from "
+                              f"{res.get('scanned', 0)} message(s) in "
+                              f"{res.get('seconds', '?')}s.\n"
+                              "Scraping now skips any target cover matching ≥90%.")
+        except Exception as e:
+            await status.edit(f"⚠️ DB2 scan failed: `{e}` — scraping continues ungated.")
+
     @bot.on(events.NewMessage(pattern=r"^/cancel$"))
     async def cancel(ev):
         _pending.pop(ev.sender_id, None)
@@ -1972,6 +2040,7 @@ def register(scrape_client, sm=None):
             await DB.set_target_paused(t["id"], True)
             state.paused_ids.add(t["id"])          # loop sees it within seconds
             state.reset_gen += 1; state._last_scan = None  # drop the current pass
+            await dedup.flush_skips(t["id"], reason="target paused")  # v45
             await ev.reply(f"⏸ Target {n} ({t['id']}) paused — other targets keep scraping.\n"
                            f"/resume {n} to resume this one.")
             return
@@ -2024,7 +2093,8 @@ def register(scrape_client, sm=None):
                            + (f" | Individually paused targets: {', '.join(ind)}" if ind else "") + "\n"
                            f"📍 Stage: {state.stage}\n📄 Current post: {state.current_post}\n"
                            f"{listing}\n🔁 Bypass: {cfg.get('bypass_id')}\n"
-                           f"🗄 Fallback DB: {cfg.get('db_id')}")
+                           f"🗄 Fallback DB: {cfg.get('db_id')}"
+                           + dedup.status_lines())   # v45: per-target dupe counters
 
     @bot.on(events.NewMessage(pattern=r"^/progress$"))
     async def progress_cmd(ev):
