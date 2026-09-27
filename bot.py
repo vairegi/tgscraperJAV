@@ -123,7 +123,8 @@ async def _parallel_one(client, cfg, msg, idx, name, resolved):
         resolved.add(msg.id)
         # v45: auto-grow — this cover is now archived in DB2, so a future
         # repost is gated WITHOUT re-scanning DB2
-        await dedup.note_scraped(cfg["target_id"], msg.message or "", msg.id)
+        await dedup.note_scraped(cfg["target_id"], msg.message or "", msg.id,
+                                 db2_id=cfg.get("db2_id"))  # v45.1 sibling sync
         log.info("post %s done (%s, parallel)", msg.id, name)
     except Abort:
         await DB.add_failure(msg.id, state.workers.get(name, "?"), "skipped by user")
@@ -320,6 +321,7 @@ async def scrape_loop(sm):
         # 'caption' (hidden hyperlink behind cfg["link_trigger"] text)
         cfg["link_mode"] = tsel.get("link_mode") or "button"
         cfg["link_trigger"] = tsel.get("link_trigger")
+        cfg["db2_id"] = tsel.get("db2_id")  # v45.1: for dedup sibling sync
         pass_gen = state.reset_gen
         if len(targets) > 1:
             log.info("multi-target: %d channels, working on %s -> DB %s", len(targets), target, cfg["db_id"])
@@ -385,7 +387,8 @@ async def scrape_loop(sm):
                     # correct id is used. iter_messages(min_id=id) is exclusive, so
                     # the completed post is not reprocessed and the next post is
                     # not skipped.
-                    await dedup.note_scraped(target, msg.message or "", msg.id)  # v45 auto-grow
+                    await dedup.note_scraped(target, msg.message or "", msg.id,
+                                             db2_id=tsel.get("db2_id"))  # v45.1 sibling sync
                     await DB.set_progress(target, msg.id)
                     posts_on_account += 1
                     log.info("post %s done (%s, %d/%d on this account)", msg.id,

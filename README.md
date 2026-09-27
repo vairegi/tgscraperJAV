@@ -165,3 +165,9 @@ Before a post's download chain even starts, the scraper checks its COVER caption
 * **Auto-grows** — every successfully scraped cover is added to the index, so a repost of a NEW post is caught later with zero DB2 re-scanning.
 * **Per-target** — targets sharing one DB2 each load their own copy of the same fingerprints, so a cover already in the shared DB2 is skipped for BOTH targets.
 * **Notifications** — skips are DM'd in batches of 10 per target, plus a mandatory flush when that target is paused (bare /pause flushes all); /status shows the per-target dupe counter.
+
+### Duplicate protection — v45.1 updates
+
+* **Shared DB2 = shared index** — targets pointing at the SAME DB2 channel share one fingerprint set: scanning once indexes every sibling, every auto-added fingerprint propagates to all of them, and `/dupescan 7` when target 8 shares the DB2 answers "shares the existing index — no rescan". A forced `/dupescan <n>` rebuild refreshes the whole DB2 group.
+* **Pause/resume reporting** — `/pause <n>` appends that target's pending skip details (post ids + % match) to its reply; `/resume <n>` reports the target's session dupe total and clears any pending batch; bare `/pause` still DMs every target's batch.
+* **Build note** — requirements pins `rapidfuzz>=3.14.6,<4`, which publishes cp314 wheels: Render's default Python 3.14 builds natively (remove the `PYTHON_VERSION=3.11.9` override).

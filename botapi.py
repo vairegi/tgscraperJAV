@@ -393,17 +393,22 @@ async def _add_target_with_db(scrape_client, ev, tid, dbid, db2=None,
                       if link_mode == "caption"
                       else "\n  Link mode: BUTTON (Download button)")
                    + "\n\n/targets to view all, /start to scrape.")
-    # v45: this target's DB2 holds the clean captions — build its
-    # duplicate-skip index ONCE, in the background (never blocks the reply)
+    # v45.1: a sibling target already scanned the SAME DB2? share its index
+    # instantly — no second scan. Otherwise build once, in the background.
     if db2 is not None:
-        async def _scan_done(res, _tid=tid):
-            try:
-                await ev.reply(f"🧬 DB2 duplicate-index ready for target {_tid}: "
-                               f"{res.get('count', 0)} cover fingerprint(s) — reposts "
-                               f"will be auto-skipped (≥90% match).")
-            except Exception:
-                pass
-        dedup.scan_db2_bg(scrape_client, tid, db2, done_cb=_scan_done)
+        shared = await dedup.share_db2(tid, db2)
+        if shared:
+            await ev.reply(f"🧬 DB2 duplicate-index shared from target {shared} "
+                           f"(same DB2 — no rescan needed).")
+        else:
+            async def _scan_done(res, _tid=tid):
+                try:
+                    await ev.reply(f"🧬 DB2 duplicate-index ready for target {_tid}: "
+                                   f"{res.get('count', 0)} cover fingerprint(s) — reposts "
+                                   f"will be auto-skipped (≥90% match).")
+                except Exception:
+                    pass
+            dedup.scan_db2_bg(scrape_client, tid, db2, done_cb=_scan_done)
 
 
 def register(scrape_client, sm=None):
@@ -839,9 +844,9 @@ def register(scrape_client, sm=None):
         await ev.reply(f"✅ Target {t['id']} now mirrors DB → DB2 {db2} (credits stripped).\n"
                        "Make sure the BOT is admin in the DB channel AND in DB2.\n"
                        "Add credit strings to strip with /avoidtext.")
-        # v45: the target now points at this DB2 — (re)build its
-        # duplicate-skip index once, in the background
-        dedup.scan_db2_bg(scrape_client, t["id"], db2)
+        # v45.1: sibling with the same DB2 already indexed? share it, else scan
+        if not await dedup.share_db2(t["id"], db2):
+            dedup.scan_db2_bg(scrape_client, t["id"], db2)
 
     @bot.on(events.NewMessage(pattern=r"^/avoidtext(?:\s+([\s\S]+))?$"))
     async def avoidtext_cmd(ev):
@@ -1739,6 +1744,66 @@ def register(scrape_client, sm=None):
             await ev.reply(c)
             await asyncio.sleep(0.5)
 
+    # ---------- v45/v45.1: DB2 duplicate-skip index ----------
+    @bot.on(events.NewMessage(pattern=r"^/dupescan(?:\s+(\d+))?$"))
+    async def dupescan_cmd(ev):
+        """(Re)build a target's DB2 duplicate-skip index. v45.1: targets
+        sharing the SAME DB2 share one index — if a sibling is already
+        indexed, this target just copies it (no rescan); a forced rebuild
+        also refreshes every sibling."""
+        if not await _admin(ev.sender_id):
+            return
+        targets = await DB.get_targets()
+        arg = ev.pattern_match.group(1)
+        if not targets:
+            await ev.reply("No targets set — /target first.")
+            return
+        if not (arg and arg.isdigit() and 1 <= int(arg) <= len(targets)):
+            cur = []
+            for i, t in enumerate(targets):
+                doc = await dedup.get_cover_fp(t["id"])
+                nfp = len((doc or {}).get("fingerprints") or [])
+                cur.append(f"  {i+1}. {t['id']} → DB2 {t.get('db2_id') or '(off)'}"
+                           f" — {nfp} fingerprint(s)")
+            await ev.reply("Usage: /dupescan <target #> — rebuild its DB2 duplicate index.\n"
+                           + "\n".join(cur))
+            return
+        t = targets[int(arg) - 1]
+        if not t.get("db2_id"):
+            await ev.reply(f"⚠️ Target {arg} has no DB2 — set one with /setdb2.")
+            return
+        try:
+            await scrape_client.get_entity(t["db2_id"])
+        except Exception as e:
+            await ev.reply(f"⚠️ Can't access DB2 — the USERBOT must be a member "
+                           f"(join it with /invite).\n`{e}`")
+            return
+        siblings = [s for s in await dedup.db2_owners(t["db2_id"]) if s != t["id"]]
+        shared = await dedup.share_db2(t["id"], t["db2_id"])
+        if shared:
+            nfp = len(dedup._FPS.get(t["id"]) or [])
+            await ev.reply(f"🧬 Target {t['id']} now shares the existing DB2 index "
+                           f"from target {shared} — {nfp} fingerprint(s), no rescan.\n"
+                           f"(Sibling targets on this DB2: {siblings or 'none'})")
+            return
+        dedup.invalidate(t["id"])
+        for sib in siblings:
+            dedup.invalidate(sib)
+        status = await ev.reply(f"🔍 Scanning DB2 {t['db2_id']} for cover-post fingerprints…"
+                                + (f"\n(Will also index sibling target(s): {siblings})"
+                                   if siblings else ""))
+        try:
+            res = await dedup.scan_db2(scrape_client, t["id"], t["db2_id"])
+            await status.edit(f"✅ Duplicate index rebuilt for target {t['id']}: "
+                              f"{res.get('count', 0)} cover fingerprint(s) from "
+                              f"{res.get('scanned', 0)} message(s) in "
+                              f"{res.get('seconds', '?')}s.\n"
+                              + (f"Sibling target(s) synced too: {res.get('synced')}\n"
+                                 if res.get("synced") else "")
+                              + "Scraping now skips any target cover matching ≥90%.")
+        except Exception as e:
+            await status.edit(f"⚠️ DB2 scan failed: `{e}` — scraping continues ungated.")
+
     # ---------- v45: DB2 duplicate-skip index ----------
     @bot.on(events.NewMessage(pattern=r"^/dupescan(?:\s+(\d+))?$"))
     async def dupescan_cmd(ev):
@@ -2040,9 +2105,12 @@ def register(scrape_client, sm=None):
             await DB.set_target_paused(t["id"], True)
             state.paused_ids.add(t["id"])          # loop sees it within seconds
             state.reset_gen += 1; state._last_scan = None  # drop the current pass
-            await dedup.flush_skips(t["id"], reason="target paused")  # v45
+            # v45.1: pending duplicate-skip details go INLINE in the pause reply
+            _sk = dedup.consume_skips(t["id"])
+            _extra = ("\n\n" + dedup.format_batch(t["id"], _sk,
+                       f"pending at pause — {len(_sk)} skip(s)")) if _sk else ""
             await ev.reply(f"⏸ Target {n} ({t['id']}) paused — other targets keep scraping.\n"
-                           f"/resume {n} to resume this one.")
+                           f"/resume {n} to resume this one." + _extra)
             return
         # ---- /resume ----
         if n is not None and n.lower() != "all" and not n.isdigit():
@@ -2081,7 +2149,14 @@ def register(scrape_client, sm=None):
         state.abort = False; state.started = True
         state.reset_gen += 1; state._last_scan = None
         rp = await DB.get_progress(t["id"])
-        await ev.reply(f"▶️ Target {n} ({t['id']}) resumed — continues from message id {rp}.")
+        # v45.1: report this target's dupe-skip summary on resume
+        _sk_total = dedup._count(t["id"])
+        _pend = dedup.consume_skips(t["id"])
+        _pend_str = ("\n" + dedup.format_batch(t["id"], _pend,
+                     f"cleared on resume — {len(_pend)} pending skip(s)")) if _pend else ""
+        _summary = f"\n🧬 Duplicates skipped so far (this session): {_sk_total}" if _sk_total else ""
+        await ev.reply(f"▶️ Target {n} ({t['id']}) resumed — continues from message id {rp}."
+                       + _summary + _pend_str)
 
     @bot.on(events.NewMessage(pattern=r"^/(status|current)$"))
     async def status_cmd(ev):

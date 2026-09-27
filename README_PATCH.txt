@@ -124,3 +124,34 @@ below-threshold pass-through, $ne-dedup push, cover-only scan filtering
 batch-of-10 DM + on-pause flush, gate-never-raises. NO live Telegram calls —
 validate one real duplicate post on a test target after deploy.
 ================================================================================
+
+================================================================================
+README_PATCH — v45.1: Python-3.14 rapidfuzz pin + shared-DB2 index sync +
+pause/resume skip details
+================================================================================
+
+DRAG onto the repo root: dedup.py, bot.py, botapi.py, requirements.txt,
+README.md, README_PATCH.txt (everything else unchanged).
+
+1) BUILD FIX — rapidfuzz pinned to >=3.14.6,<4 (cp314 manylinux wheels are
+   published on PyPI from 3.14.6; 3.10.1 had none, forcing a failing
+   scikit-build-core source build on Python 3.14). Remove the Render
+   PYTHON_VERSION=3.11.9 override after deploy.
+2) SHARED DB2 — targets pointing at the same DB2 channel share ONE
+   fingerprint index: dedup.share_db2() copies a sibling's index (RAM +
+   Mongo, marked 'shared_from') instead of rescanning; scan_db2() syncs
+   every sibling on completion; remember() propagates every auto-added
+   fingerprint to all siblings. /dupescan shares when a sibling index
+   exists; a forced rebuild invalidates siblings so one rebuild refreshes
+   the whole DB2 group. /target and /setdb2 share first, scan second.
+3) PAUSE/RESUME DETAILS — /pause <n> appends the target's pending skip
+   batch (post ids + % match) inline via dedup.consume_skips()/
+   format_batch(); /resume <n> reports the target's session dupe total
+   and clears any pending batch. Bare /pause still DMs every target's batch.
+
+TESTING: py_compile PASS on all 13 files; 30-assertion mocked suite
+(fingerprint cut/fold/strip, exact + fuzzy >=90, below-threshold pass,
+$ne dedup, cover-only scan filtering, sibling share + scan sync + remember
+propagation, cached rescan no-op, batch-of-10 DM, pause consume-vs-flush,
+gate-never-raises on Mongo failure). NO live Telegram calls.
+================================================================================
