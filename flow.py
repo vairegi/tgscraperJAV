@@ -500,25 +500,57 @@ async def process_post(client, cfg, msg, worker_name=None):
     await asyncio.sleep(STEP_DELAY)
 
     # 6) LINK_BOT replies 'Here is your link https://t.me/<MEDIA_BOT>?start=...'
+    # v46.3 HYBRID: some link bots skip the MEDIA_BOT hop entirely and post the
+    # video(s) themselves (e.g. @Hanimes_nation_bot). Detect that: after the
+    # bypass, if the link bot has already delivered video files, collect them
+    # DIRECTLY from the link bot and forward to DB — no 'final link' needed.
     state.stage = f"waiting @{link_bot} final link"
-    fm2 = await _wait_new(client, link_bot, base_f, WAIT_BOT_REPLY, need_text="t.me/")
-    bot, payload = parse_tg_start(fm2.text)
-    if not bot:
-        # last resort: env-var MEDIA_BOT (kept for backward compat)
-        bot = MEDIA_BOT
+    media = None
+    fm2 = None
+    try:
+        fm2 = await _wait_new(client, link_bot, base_f, WAIT_BOT_REPLY,
+                              need_text="t.me/")
+    except TimeoutError:
+        fm2 = None
+    if fm2 is not None and any(is_video_msg(mm) for mm in [fm2]):
+        # the 'final' message itself IS a video — treat link bot as media bot
+        log.info("post %s: @%s replied WITH video(s) — hybrid direct-media mode",
+                 msg.id, link_bot)
+        media = [fm2] + await _collect_media(client, link_bot, fm2.id)
+        bot = link_bot
         payload = None
+    else:
+        bot, payload = parse_tg_start(fm2.text if fm2 else "")
         if not bot:
-            raise RuntimeError(f"no t.me start link in @{link_bot} final message "
-                               "and no MEDIA_BOT fallback set")
-    log.info("post %s: MEDIA_BOT=@%s (from @%s final link)", msg.id, bot, link_bot)
-
-    await asyncio.sleep(STEP_DELAY)
-
-    # 7) open Rias bot -> collect video(s) + .srt
-    state.stage = f"collecting media from @{bot}"
-    base = await _last_id(client, bot)
-    await client.send_message(bot, f"/start {payload}" if payload else "/start")
-    media = await _collect_media(client, bot, base)
+            # no deep link in the final text — maybe the link bot is uploading
+            # videos right now. Collect whatever arrived since base_f; if any
+            # video is in there, use it directly instead of failing.
+            direct = await _collect_media(client, link_bot, base_f)
+            if any(is_video_msg(mm) for mm in direct):
+                log.info("post %s: @%s gave no t.me link but DID send video(s) "
+                         "— hybrid direct-media mode", msg.id, link_bot)
+                media = direct
+                bot = link_bot
+                payload = None
+            else:
+                # last resort: env-var MEDIA_BOT (kept for backward compat)
+                bot = MEDIA_BOT
+                payload = None
+                if not bot:
+                    raise RuntimeError(
+                        f"no t.me start link in @{link_bot} final message, "
+                        f"no direct videos, and no MEDIA_BOT fallback set")
+    if media is None:
+        log.info("post %s: MEDIA_BOT=@%s (from @%s final link)", msg.id, bot, link_bot)
+        await asyncio.sleep(STEP_DELAY)
+        # 7) open Rias bot -> collect video(s) + .srt
+        state.stage = f"collecting media from @{bot}"
+        base = await _last_id(client, bot)
+        await client.send_message(bot, f"/start {payload}" if payload else "/start")
+        media = await _collect_media(client, bot, base)
+    else:
+        log.info("post %s: collected %d message(s) directly from @%s",
+                 msg.id, len(media), bot)
     # a video message has BOTH .video and .document — exclude videos from
     # the document list or every video gets sent twice (vid1,vid1,vid2,vid2)
     vids = [m for m in media if is_video_msg(m)]
