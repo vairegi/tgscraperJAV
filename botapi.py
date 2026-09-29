@@ -20,7 +20,7 @@ import time
 import random
 import db as DB
 import mtprotomgr as MTM
-import dedup  # v45: DB2 duplicate-skip index
+import dedup  # v45/v46: DB2 duplicate-skip index + auto-index + alerts
 import richboard
 from flow import state
 from telethon.tl.types import Channel, Chat, User
@@ -54,7 +54,7 @@ _CMDS = [
     ("reset",    "Reset a target's progress to post 1"),
     ("lastpost", "Newest post in a target channel"),
     ("scan4duplicates", "v43.3: find duplicate COVER posts in a DB2 channel (story-only fuzzy match)"),
-    ("dupescan", "v45: rebuild a target's DB2 duplicate-skip index: /dupescan <n>"),
+    ("dupescan", "v45: rebuild a target's DB2 duplicate-skip index: /dupescan <n> (v46 auto-indexes new DB2 covers)"),
     ("start",    "Start scraping"),
     ("pause",    "Pause all (bare or /pause all), or one: /pause 2"),
     ("resume",   "Resume all (bare or /resume all), or one: /resume 2"),
@@ -90,6 +90,7 @@ _CMDS = [
 
 _pending = {}  # user_id -> (kind, extra)
 _sm = [None]   # v40: SessionManager, set by register()
+_BG_TASKS = []  # v46: keep-alive refs for background tasks (DB2 tail-scan scheduler)
 log_mirror = logging.getLogger("db2mirror")
 
 # v39: validate a bypass endpoint (GROUP id or BOT @username) via the
@@ -704,7 +705,7 @@ def register(scrape_client, sm=None):
             _DB2_CACHE["map"] = m
         return _DB2_CACHE["map"]
 
-    async def _copy_to_db2(m, db2, avoids):
+    async def _copy_to_db2(m, db2, avoids, target_id=None):
         """Copy ONE DB message into DB2 as a fresh bot post (no forward tag),
         caption cleaned. FloodWait is slept through in place."""
         # v40: GLOBAL DB2 rules — /replaceword rewrites first, then _clean_caption
@@ -717,11 +718,21 @@ def register(scrape_client, sm=None):
         spoiler = bool(getattr(getattr(m, "media", None), "spoiler", False))
         for _ in range(3):
             try:
+                sent = None
                 if getattr(m, "media", None) is not None:
-                    await bot.send_file(db2, m.media, caption=cap,
-                                        buttons=m.buttons, spoiler=spoiler)
+                    sent = await bot.send_file(db2, m.media, caption=cap,
+                                               buttons=m.buttons, spoiler=spoiler)
                 elif cap:
-                    await bot.send_message(db2, cap)
+                    sent = await bot.send_message(db2, cap)
+                # v46: index this cover the instant it lands in DB2, using the
+                # CLEANED caption (exactly what DB2 now shows), so the stored
+                # fingerprint == the DB2 fingerprint — a future repost is gated
+                # without ever re-scanning DB2.
+                if target_id and getattr(m, "photo", None) is not None:
+                    _fp = dedup.fingerprint_cover(cap)
+                    if _fp:
+                        await dedup.remember(target_id, _fp,
+                                             getattr(sent, "id", 0), db2_id=db2)
                 return True
             except FloodWaitError as fe:
                 await asyncio.sleep(min(getattr(fe, "seconds", 60), BULK_MAX_FLOOD) + 5)
@@ -745,7 +756,8 @@ def register(scrape_client, sm=None):
             return
         lock = _DB2_LOCKS.setdefault(ev.chat_id, asyncio.Lock())
         async with lock:
-            await _copy_to_db2(ev.message, t["db2_id"], t.get("avoid") or [])
+            await _copy_to_db2(ev.message, t["db2_id"], t.get("avoid") or [],
+                               target_id=t["id"])
 
     async def _db2_bulk_edit(ev, old, new):
         """BOT edits every message containing `old` in every DB2 channel —
@@ -2389,10 +2401,43 @@ async def _bulk_edit(scrape_client, ev, channel, old, new):
     return asyncio.ensure_future(_worker())
 
 
+DEDUP_TAIL_INTERVAL = 1800  # v46: auto tail-scan every DB2 every 30 min
+
+
+async def _dedup_tail_scheduler(scrape_client):
+    """v46: index NEW DB2 covers automatically so /dupescan is never needed.
+    One tail-scan per unique DB2 per cycle (siblings sharing a DB2 aren't
+    scanned twice). Fully defensive — a failure logs and the loop continues."""
+    await asyncio.sleep(15)               # let startup settle
+    while True:
+        try:
+            seen = set()
+            for t in await DB.get_targets():
+                db2 = t.get("db2_id")
+                if not db2 or db2 in seen:
+                    continue
+                seen.add(db2)
+                res = await dedup.tail_scan_db2(scrape_client, db2)
+                n = res.get("added") or 0
+                if n:
+                    logging.getLogger("botapi").info(
+                        "dedup tail-scan DB2 %s: +%d fingerprint(s)", db2, n)
+                    await dedup.notify_tail_added(db2, n)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.getLogger("botapi").exception(
+                "dedup tail-scan scheduler error (continuing)")
+        await asyncio.sleep(DEDUP_TAIL_INTERVAL)
+
+
 async def start(scrape_client, sm=None):
     global bot
     bot = TelegramClient(MemorySession(), API_ID, API_HASH)
     await bot.start(bot_token=BOT_TOKEN)
     register(scrape_client, sm)
     await _menu()
+    # v46: DB2 auto-index — startup tail-scan then every 30 min (manual DB2
+    # posts get gated automatically; /dupescan is no longer required).
+    _BG_TASKS.append(asyncio.ensure_future(_dedup_tail_scheduler(scrape_client)))
     return bot

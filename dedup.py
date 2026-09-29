@@ -1,9 +1,20 @@
-"""dedup.py — v45/v45.1: DB2-cover fingerprint index + duplicate-skip gate.
+"""dedup.py — v46: DB2-cover fingerprint index + duplicate-skip gate.
 
 Fingerprints ONLY DB2 cover posts (m.photo). Match = exact OR rapidfuzz
 token_set_ratio >= 90. One scan per DB2 ever; siblings sharing a DB2 share
-the index; every scraped cover auto-grows all siblings. /pause returns
-pending skip details inline; batches DM after 10 per target."""
+the index; every scraped cover auto-grows all siblings.
+
+v46 additions (all backwards-compatible):
+  * Mongo->RAM refresh: the running process re-pulls the fingerprints every
+    REFRESH_TTL seconds and MERGES them, so a fingerprint pushed by the laptop
+    script (or another process) is honoured live — no Render restart needed.
+    This is the fix for "sometimes it skips, sometimes it doesn't".
+  * tail_scan_db2(): an INCREMENTAL, cursor-based DB2 scan that indexes only
+    covers newer than the stored db2_cover_index.last_indexed_msg_id — so new
+    DB2 posts (mirrored by the bot OR posted by hand) get gated automatically.
+  * Instant admin alert on EVERY skip (flood-wait-guarded) + a per-batch
+    summary. Remember() now retries the Mongo push and warns loudly on failure.
+"""
 import asyncio, logging, re, time, unicodedata
 import db as DB
 
@@ -15,13 +26,24 @@ except Exception:                       # pragma: no cover
     import difflib
     def _ratio(a, b): return difflib.SequenceMatcher(None, a, b).ratio() * 100
 
+try:                                    # telethon may be absent in unit tests
+    from telethon.errors import FloodWaitError as _FloodWaitError
+except Exception:                       # pragma: no cover
+    class _FloodWaitError(Exception):
+        pass
+
 DUP_THRESHOLD = 90.0
 DUP_BATCH = 10
 FP_CAP = 20000
 FP_MAX_KEEP = 60000
 
+REFRESH_TTL = 300.0        # v46: re-pull Mongo fingerprints into RAM every 5 min
+INSTANT_SKIP_ALERT = True  # v46: DM the admin the moment a dupe is skipped
+
 _FPS, _INDEXED, _BUILDING, _LOCKS = {}, set(), {}, {}
 _PENDING_SKIPS, _COUNTS, _DB2_OWNERS = {}, {}, {}
+_LAST_REFRESH = {}         # v46: target_id -> last Mongo->RAM refresh ts
+_DM_LOCK = asyncio.Lock()  # v46: serialize admin DMs (avoid flood bursts)
 
 
 def _lock(t):
@@ -115,6 +137,7 @@ async def share_db2(target_id, db2_id):
         if fps:
             _FPS[target_id] = fps[:FP_MAX_KEEP]
             _INDEXED.add(target_id)
+            _LAST_REFRESH[target_id] = time.time()
             await DB.db().cover_fp.update_one({"_id": str(target_id)},
                 {"$set": {"target_id": target_id, "db2_id": db2_id,
                           "scanned_at": time.time(), "shared_from": sib,
@@ -133,11 +156,46 @@ async def _load_from_mongo(t):
     return bool(fps)
 
 
+async def _refresh_from_mongo(t):
+    """v46: MERGE any fingerprints added to Mongo since the last load into RAM.
+    Never drops what we already hold — only unions new ones to the front."""
+    doc = await get_cover_fp(t)
+    disk = [e["fp"] for e in (doc or {}).get("fingerprints") or []]
+    if not disk: return False
+    lst = _FPS.setdefault(t, [])
+    have = set(lst)
+    new = [fp for fp in disk if fp not in have]
+    if new:
+        lst[:0] = new
+        del lst[FP_MAX_KEEP:]
+    return bool(lst)
+
+
 async def ensure_index(t):
-    if t in _FPS: return bool(_FPS[t])
+    """Load the index from Mongo on first use, then keep it fresh: past
+    REFRESH_TTL seconds we re-merge Mongo so fingerprints pushed by the laptop
+    script / another process are honoured without a restart."""
+    if t in _FPS:
+        if time.time() - _LAST_REFRESH.get(t, 0) < REFRESH_TTL:
+            return bool(_FPS[t])
+        async with _lock(t):
+            try:
+                await _refresh_from_mongo(t)
+            except Exception as e:
+                log.warning("dedup: refresh from Mongo failed for %s (%s)", t, e)
+        _LAST_REFRESH[t] = time.time()
+        return bool(_FPS.get(t))
     async with _lock(t):
-        if t in _FPS: return bool(_FPS[t])
-        return await _load_from_mongo(t)
+        if t in _FPS:
+            ok = bool(_FPS[t])
+        else:
+            try:
+                ok = await _load_from_mongo(t)
+            except Exception as e:
+                log.warning("dedup: initial load failed for %s (%s)", t, e)
+                ok = False
+        _LAST_REFRESH[t] = time.time()
+        return ok
 
 
 async def find_dup(t, sig):
@@ -152,7 +210,9 @@ async def find_dup(t, sig):
 
 
 async def remember(t, fp, mid, db2_id=None):
-    """Grow this target AND every sibling on the same DB2 (v45.1)."""
+    """Grow this target AND every sibling on the same DB2 (v45.1). v46: the
+    Mongo push is retried and logs loudly on failure (a lost push used to mean
+    an un-gated repost after the next restart)."""
     if not fp: return
     owners = [t]
     if db2_id is None:
@@ -166,7 +226,16 @@ async def remember(t, fp, mid, db2_id=None):
             lst = _FPS.setdefault(tid, [])
             if fp not in lst:
                 lst.insert(0, fp); del lst[FP_MAX_KEEP:]
-        await add_cover_fp(tid, fp, mid)
+        for attempt in range(2):
+            try:
+                await add_cover_fp(tid, fp, mid)
+                break
+            except Exception as e:
+                if attempt:
+                    log.warning("dedup: Mongo push FAILED for %s (%s) — "
+                                "fingerprint kept in RAM only", tid, e)
+                else:
+                    await asyncio.sleep(0.5)
 
 
 async def already_indexed(target_id, caption):
@@ -179,6 +248,50 @@ async def already_indexed(target_id, caption):
 async def note_scraped(target_id, caption, mid, db2_id=None):
     try: await remember(target_id, fingerprint_cover(caption), mid, db2_id=db2_id)
     except Exception as e: log.warning("dedup: remember failed (%s)", e)
+
+
+# ---- v46: incremental DB2 tail-scan (index brand-new DB2 covers) ----
+async def tail_scan_db2(client, db2_id, progress_cb=None):
+    """Index ONLY covers newer than the stored cursor (idempotent).
+    Returns {status, added, scanned, cursor}. Safe to call repeatedly — a
+    cover already indexed is never added twice ($ne guard + RAM set check)."""
+    owners = await db2_owners(db2_id)
+    if not owners:
+        return {"status": "no_owners", "added": 0, "scanned": 0, "cursor": None}
+    idx = await get_db2_index(db2_id)
+    cursor = (idx or {}).get("last_indexed_msg_id") or 0
+    try:
+        await ensure_index(owners[0])
+    except Exception:
+        pass
+    new_fps, max_seen, count = [], cursor, 0
+    seen_sigs = set()
+    async for m in client.iter_messages(db2_id, min_id=cursor, reverse=True):
+        count += 1
+        if m.id > max_seen: max_seen = m.id
+        if not getattr(m, "photo", None): continue
+        sig = fingerprint_cover(m.message or "")
+        if not sig or sig in seen_sigs: continue
+        seen_sigs.add(sig)
+        new_fps.append((sig, m.id))
+        if progress_cb and count % 100 == 0:
+            try: await progress_cb(count, len(new_fps))
+            except Exception: pass
+    added = 0
+    for sig, mid in new_fps:
+        if sig in (_FPS.get(owners[0]) or []):
+            continue                      # already known — no double index
+        try:
+            await remember(owners[0], sig, mid, db2_id=db2_id)
+            added += 1
+        except Exception as e:
+            log.warning("dedup: tail-scan remember failed (%s)", e)
+    if max_seen > cursor:
+        await set_db2_index(db2_id, max_seen)
+    log.info("dedup: tail-scan DB2 %s — scanned %d, +%d new fp (cursor %s)",
+             db2_id, count, added, max_seen)
+    return {"status": "done", "added": added, "scanned": count,
+            "cursor": max_seen, "owners": owners}
 
 
 # ---- batched skip notifications ----
@@ -223,11 +336,46 @@ async def _dm_admins(text):
     if not sent: log.warning("dedup: skip batch could not be delivered: %s", text[:120])
 
 
+async def _safe_dm(text):
+    """v46: flood-wait-guarded, serialized admin DM. Never raises."""
+    for attempt in range(2):
+        try:
+            async with _DM_LOCK:
+                await _dm_admins(text)
+            return True
+        except _FloodWaitError as fe:
+            await asyncio.sleep(min(getattr(fe, "seconds", 30), 300) + 1)
+        except Exception as e:
+            log.warning("dedup: admin DM failed (%s)", e)
+            return False
+    return False
+
+
+async def _instant_skip_alert(target_id, msg_id, score, match_fp):
+    """v46: DM the admin the moment a duplicate is skipped."""
+    if not INSTANT_SKIP_ALERT: return
+    txt = (f"🔁 *DUPLICATE SKIPPED*\n"
+           f"• target: `{target_id}`\n"
+           f"• post: `{msg_id}`\n"
+           f"• match: {score}% in DB2\n"
+           f"• fp: `{(match_fp or '')[:80]}`")
+    await _safe_dm(txt)
+
+
+async def notify_tail_added(db2_id, added, owners=None):
+    """v46: tell the admin the DB2 auto-index grew (new covers indexed)."""
+    txt = (f"🧬 *DB2 auto-index updated*\n"
+           f"• DB2: `{db2_id}`\n"
+           f"• new cover fingerprint(s) stored: {added}\n"
+           f"• future reposts of these covers will be auto-skipped.")
+    await _safe_dm(txt)
+
+
 async def flush_skips(target_id, reason="batch of %d" % DUP_BATCH):
     q = _PENDING_SKIPS.get(target_id) or []
-    if not q: return
+    if not q: return                       # empty batch -> no DM
     _PENDING_SKIPS[target_id] = []
-    try: await _dm_admins(format_batch(target_id, q, reason))
+    try: await _safe_dm(format_batch(target_id, q, reason))
     except Exception as e: log.warning("dedup: flush_skips DM failed (%s)", e)
 
 
@@ -247,17 +395,18 @@ async def _record_skip(target_id, msg_id, score, match_fp):
 
 async def record_skip(target_id, msg_id, score, match_fp):
     try:
+        await _instant_skip_alert(target_id, msg_id, score, match_fp)
         await _record_skip(target_id, msg_id, score, match_fp)
         await DB.incr("dupes_skipped")
     except Exception as e: log.warning("dedup: record_skip failed (%s)", e)
 
 
 def is_indexed(t): return t in _INDEXED
-def invalidate(t): _INDEXED.discard(t); _FPS.pop(t, None)
+def invalidate(t): _INDEXED.discard(t); _FPS.pop(t, None); _LAST_REFRESH.pop(t, None)
 
 
 async def scan_db2(client, target_id, db2_id, progress_cb=None):
-    """ONE-TIME scan; also seeds every sibling target sharing this DB2."""
+    """FULL scan; also seeds every sibling target sharing this DB2."""
     if target_id in _INDEXED and _FPS.get(target_id):
         return {"status": "cached", "count": len(_FPS[target_id])}
     tsk = _BUILDING.get(target_id)
@@ -266,9 +415,10 @@ async def scan_db2(client, target_id, db2_id, progress_cb=None):
 
     async def _run():
         t0 = time.time()
-        fps, count, covers = [], 0, 0
+        fps, count, covers, max_seen = [], 0, 0, 0
         async for m in client.iter_messages(db2_id):
             count += 1
+            if m.id > max_seen: max_seen = m.id
             if count % 100 == 0:
                 await asyncio.sleep(0.1)
                 if progress_cb:
@@ -280,14 +430,14 @@ async def scan_db2(client, target_id, db2_id, progress_cb=None):
             covers += 1
             fps.append((sig, m.id))
         await init_cover_fp(target_id, db2_id, fps, count, round(time.time() - t0, 1))
-        await set_db2_index(db2_id, fps[0][1] if fps else 0)
+        await set_db2_index(db2_id, max_seen or (fps[0][1] if fps else 0))
         async with _lock(target_id):
             _FPS[target_id] = [fp for fp, _ in fps][:FP_MAX_KEEP]
-        _INDEXED.add(target_id)
+        _INDEXED.add(target_id); _LAST_REFRESH[target_id] = time.time()
         for sib in siblings:
             async with _lock(sib):
                 _FPS[sib] = [fp for fp, _ in fps][:FP_MAX_KEEP]
-            _INDEXED.add(sib)
+            _INDEXED.add(sib); _LAST_REFRESH[sib] = time.time()
             await init_cover_fp(sib, db2_id, fps, count, round(time.time() - t0, 1))
         log.info("dedup: target %s indexed — %d fp from DB2 %s (+%d sibling(s))",
                  target_id, len(fps), db2_id, len(siblings))
@@ -308,8 +458,8 @@ def scan_db2_bg(client, target_id, db2_id, done_cb=None):
         except Exception as e:
             log.exception("dedup: background DB2 scan failed for target %s", target_id)
             try:
-                await _dm_admins(f"⚠️ DB2 duplicate-index scan FAILED for target "
-                                 f"{target_id}: `{e}`\nScraping continues UNGATED — "
-                                 f"rebuild with /dupescan.")
+                await _safe_dm(f"⚠️ DB2 duplicate-index scan FAILED for target "
+                               f"{target_id}: `{e}`\nScraping continues UNGATED — "
+                               f"rebuild with /dupescan.")
             except Exception: pass
     asyncio.ensure_future(_bg())

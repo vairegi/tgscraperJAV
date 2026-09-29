@@ -1,3 +1,44 @@
+================================================================================
+v46 — DUPLICATE-DETECTION HARDENING (Render bot)
+================================================================================
+Files changed: dedup.py, botapi.py (README.md, README_PATCH.txt updated).
+
+WHY: identical DB2 cover captions sometimes skipped, sometimes not. Root cause
+was index FRESHNESS, not the fuzzy matcher:
+  1) _FPS loaded from Mongo once per process and never refreshed — a fingerprint
+     pushed by the LAPTOP script was invisible to the long-running Render bot
+     until its next restart.
+  2) note_scraped()'s Mongo push failed silently -> RAM-only fingerprint, lost
+     on restart.
+  3) note_scraped() fingerprinted the RAW target caption, not the CLEANED
+     caption that actually lands in DB2 (/avoid, /replaceword, link strip).
+
+NEW IN v46
+  * Mongo->RAM refresh (REFRESH_TTL = 300s): ensure_index() re-merges Mongo every
+    5 min WITHOUT dropping what RAM already holds, so laptop-script fingerprints
+    are honoured live. Fixes the intermittent skip.
+  * DB2 AUTO-INDEX — no more /dupescan needed:
+      - db2_mirror hook: every cover the bot mirrors into DB2 is fingerprinted
+        from its CLEANED caption the instant it lands (stored fp == DB2 fp).
+      - tail_scan_db2(): incremental, cursor-based scan (db2_cover_index
+        .last_indexed_msg_id) that indexes ONLY new DB2 covers — idempotent, so
+        covers posted into DB2 BY HAND get auto-indexed within 30 min.
+      - startup tail-scan + every 30 min (DEDUP_TAIL_INTERVAL, sibling-aware:
+        one scan per unique DB2 per cycle).
+  * ADMIN ALERTS: an instant DM on EVERY duplicate skip (flood-wait-guarded,
+    serialized), PLUS a per-batch summary every 10 (empty batch = no DM, so
+    /pause won't send "0 skipped").
+  * remember() retries its Mongo push and logs a loud warning on failure.
+  * All new background work is wrapped in try/except so one error never kills
+    the bot; single-process / Render-safe.
+
+ALL PREVIOUS BEHAVIOUR IS UNCHANGED (exact-or->=90 fuzzy match, per-DB2 sibling
+sharing, cover-only scanning, auto-grow, /dupescan, /pause|/resume skip detail).
+TESTING: py_compile PASS on all 14 files; 20-assertion mocked suite PASS
+(tail-scan add + idempotent + cursor, external-push refresh, sibling propagation,
+instant alert x10 + single batch summary + empty-batch no-op, no-double-index).
+================================================================================
+
 # Telegram MTProto Userbot — Post/File Scraper
 
 Scrapes a target channel post-by-post: clicks **Download** → @Fubuki_xRobot
