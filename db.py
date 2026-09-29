@@ -346,6 +346,30 @@ async def set_progress(target_id, last_id):
     await db().progress.update_one({"_id": str(target_id)},
         {"$set": {"last_id": last_id, "ts": time.time()}}, upsert=True)
 
+
+def _clink(cid, mid):
+    d = str(cid); d = d[4:] if d.startswith("-100") else d.lstrip("-")
+    return f"https://t.me/c/{d}/{mid}"
+
+
+async def record_dup_pair(target_id, db2_id, target_msg, db2_msg, score, fp):
+    # v46.1: persist the dup-pair links alongside the caption fingerprint so
+    # you can click through and eyeball both posts later. Newest 500 kept.
+    try:
+        entry = {"target_msg": target_msg,
+                 "target_link": _clink(target_id, target_msg),
+                 "db2_msg": db2_msg,
+                 "db2_link": (_clink(db2_id, db2_msg) if db2_id else None),
+                 "score": score, "fp": (fp or "")[:160], "ts": time.time()}
+        await db().dup_skips.update_one(
+            {"_id": str(target_id)},
+            {"$set": {"db2_id": db2_id, "updated_at": time.time()},
+             "$push": {"pairs": {"$each": [entry],
+                                 "$position": 0, "$slice": 500}}},
+            upsert=True)
+    except Exception:
+        pass
+
 async def reset_progress(target_id):
     await db().progress.delete_one({"_id": str(target_id)})
 

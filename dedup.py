@@ -44,6 +44,43 @@ _FPS, _INDEXED, _BUILDING, _LOCKS = {}, set(), {}, {}
 _PENDING_SKIPS, _COUNTS, _DB2_OWNERS = {}, {}, {}
 _LAST_REFRESH = {}         # v46: target_id -> last Mongo->RAM refresh ts
 _DM_LOCK = asyncio.Lock()  # v46: serialize admin DMs (avoid flood bursts)
+_DB2_BY_TARGET = {}        # v46.1: target_id -> db2_id cache (1h) for skip links
+_FPS_MID = {}              # v46.1: target_id -> {fp: db2_msg_id} for match links
+
+
+def _chan_link(cid, mid):
+    # Telegram private-channel link: t.me/c/<digits-without -100>/<msg_id>
+    try:
+        d = str(cid)
+        d = d[4:] if d.startswith("-100") else d.lstrip("-")
+        return f"https://t.me/c/{d}/{mid}"
+    except Exception:
+        return f"https://t.me/c/0/{mid}"
+
+
+def _fp_midmap(doc):
+    m = {}
+    for e in (doc or {}).get("fingerprints") or []:
+        if isinstance(e, dict):
+            m[e.get("fp")] = e.get("first_seen_msg") or 0
+    return m
+
+
+async def _db2_for(t):
+    # v46.1: resolve a target's DB2 id (target doc first, then cover_fp).
+    e = _DB2_BY_TARGET.get(t)
+    if e and time.time() - e[1] < 3600: return e[0]
+    db2 = None
+    try:
+        for c in await DB.get_targets():
+            if c.get("id") == t and c.get("db2_id"):
+                db2 = c["db2_id"]; break
+        if db2 is None:
+            db2 = ((await get_cover_fp(t)) or {}).get("db2_id")
+    except Exception:
+        pass
+    _DB2_BY_TARGET[t] = (db2, time.time())
+    return db2
 
 
 def _lock(t):
@@ -153,6 +190,7 @@ async def _load_from_mongo(t):
     doc = await get_cover_fp(t)
     fps = [e["fp"] for e in (doc or {}).get("fingerprints") or []]
     _FPS[t] = fps[:FP_MAX_KEEP]
+    _FPS_MID[t] = _fp_midmap(doc)
     return bool(fps)
 
 
@@ -168,6 +206,9 @@ async def _refresh_from_mongo(t):
     if new:
         lst[:0] = new
         del lst[FP_MAX_KEEP:]
+    mm = _FPS_MID.setdefault(t, {})
+    for fp, mmid in _fp_midmap(doc).items():
+        mm.setdefault(fp, mmid)
     return bool(lst)
 
 
@@ -199,14 +240,18 @@ async def ensure_index(t):
 
 
 async def find_dup(t, sig):
+    # Returns (match_fp, score, match_db2_mid) or None. match_db2_mid is the
+    # DB2 message id of the matched cover (from first_seen_msg) used for the
+    # tappable 'DB2 SAME POST' link. Old indexes store fp as strings -> None.
     if not sig or not await ensure_index(t): return None
     fps = _FPS.get(t) or []
-    if sig in fps: return sig, 100.0
+    mids = _FPS_MID.get(t) or {}
+    if sig in fps: return sig, 100.0, mids.get(sig)
     best, best_fp = 0.0, None
     for fp in fps:
         r = _ratio(sig, fp)
         if r > best: best, best_fp = r, fp
-    return (best_fp, round(best, 1)) if best >= DUP_THRESHOLD else None
+    return (best_fp, round(best, 1), mids.get(best_fp)) if best >= DUP_THRESHOLD else None
 
 
 async def remember(t, fp, mid, db2_id=None):
@@ -226,6 +271,7 @@ async def remember(t, fp, mid, db2_id=None):
             lst = _FPS.setdefault(tid, [])
             if fp not in lst:
                 lst.insert(0, fp); del lst[FP_MAX_KEEP:]
+            _FPS_MID.setdefault(tid, {})[fp] = mid
         for attempt in range(2):
             try:
                 await add_cover_fp(tid, fp, mid)
@@ -305,9 +351,12 @@ def status_lines():
     return "\n" + "\n".join(out)
 
 
-def format_batch(target_id, entries, reason):
+def format_batch(target_id, entries, reason, db2_id=None):
     lines = [f"📋 DUPLICATES SKIPPED — target {target_id} ({reason})"]
-    for s in entries: lines.append(f"• post {s['msg_id']} — {s['score']}% match in DB2")
+    for s in entries:
+        lines.append(f"• post {s['msg_id']} — {s['score']}% match in DB2")
+        if db2_id and s.get("match_mid"):
+            lines.append(f"  db2: {_chan_link(db2_id, s['match_mid'])}")
     fp = entries[-1].get("match_fp") if entries else ""
     if fp: lines.append(f"last match: {fp}…")
     lines.append(f"total dupes this session: {_count(target_id)}")
@@ -351,13 +400,17 @@ async def _safe_dm(text):
     return False
 
 
-async def _instant_skip_alert(target_id, msg_id, score, match_fp):
-    """v46: DM the admin the moment a duplicate is skipped."""
+async def _instant_skip_alert(target_id, msg_id, score, match_fp, match_mid):
+    # v46.1: instant DM with tappable target-post AND DB2-match links.
     if not INSTANT_SKIP_ALERT: return
+    db2 = await _db2_for(target_id)
+    tgt = _chan_link(target_id, msg_id)
+    db2l = _chan_link(db2, match_mid) if (db2 and match_mid) else "(not recorded — old index)"
     txt = (f"🔁 *DUPLICATE SKIPPED*\n"
            f"• target: `{target_id}`\n"
-           f"• post: `{msg_id}`\n"
+           f"• post: {tgt}\n"
            f"• match: {score}% in DB2\n"
+           f"• DB2 SAME POST: {db2l}\n"
            f"• fp: `{(match_fp or '')[:80]}`")
     await _safe_dm(txt)
 
@@ -371,11 +424,11 @@ async def notify_tail_added(db2_id, added, owners=None):
     await _safe_dm(txt)
 
 
-async def flush_skips(target_id, reason="batch of %d" % DUP_BATCH):
+async def flush_skips(target_id, reason="batch of %d" % DUP_BATCH, db2_id=None):
     q = _PENDING_SKIPS.get(target_id) or []
     if not q: return                       # empty batch -> no DM
     _PENDING_SKIPS[target_id] = []
-    try: await _safe_dm(format_batch(target_id, q, reason))
+    try: await _safe_dm(format_batch(target_id, q, reason, db2_id=db2_id))
     except Exception as e: log.warning("dedup: flush_skips DM failed (%s)", e)
 
 
@@ -384,25 +437,33 @@ def consume_skips(target_id):
     return _PENDING_SKIPS.pop(target_id, [])
 
 
-async def _record_skip(target_id, msg_id, score, match_fp):
+async def _record_skip(target_id, msg_id, score, match_fp, match_mid):
     entry = {"msg_id": msg_id, "score": score,
-             "match_fp": (match_fp or "")[:120], "ts": time.time()}
+             "match_fp": (match_fp or "")[:120], "match_mid": match_mid,
+             "ts": time.time()}
     _PENDING_SKIPS.setdefault(target_id, []).append(entry)
     _COUNTS[target_id] = _COUNTS.get(target_id, 0) + 1
     if len(_PENDING_SKIPS[target_id]) >= DUP_BATCH:
-        await flush_skips(target_id)
+        db2 = await _db2_for(target_id)
+        await flush_skips(target_id, db2_id=db2)
 
 
-async def record_skip(target_id, msg_id, score, match_fp):
+async def record_skip(target_id, msg_id, score, match_fp, match_mid=None):
     try:
-        await _instant_skip_alert(target_id, msg_id, score, match_fp)
-        await _record_skip(target_id, msg_id, score, match_fp)
+        await _instant_skip_alert(target_id, msg_id, score, match_fp, match_mid)
+        await _record_skip(target_id, msg_id, score, match_fp, match_mid)
         await DB.incr("dupes_skipped")
+        if match_mid:  # v46.1: persist the dup-pair link like the caption fp
+            db2 = await _db2_for(target_id)
+            await DB.record_dup_pair(target_id, db2, msg_id,
+                                     match_mid, score, match_fp)
     except Exception as e: log.warning("dedup: record_skip failed (%s)", e)
 
 
 def is_indexed(t): return t in _INDEXED
-def invalidate(t): _INDEXED.discard(t); _FPS.pop(t, None); _LAST_REFRESH.pop(t, None)
+def invalidate(t):
+    _INDEXED.discard(t); _FPS.pop(t, None); _LAST_REFRESH.pop(t, None)
+    _FPS_MID.pop(t, None); _DB2_BY_TARGET.pop(t, None)
 
 
 async def scan_db2(client, target_id, db2_id, progress_cb=None):
@@ -433,10 +494,12 @@ async def scan_db2(client, target_id, db2_id, progress_cb=None):
         await set_db2_index(db2_id, max_seen or (fps[0][1] if fps else 0))
         async with _lock(target_id):
             _FPS[target_id] = [fp for fp, _ in fps][:FP_MAX_KEEP]
+        _FPS_MID[target_id] = {fp: mid for fp, mid in fps}
         _INDEXED.add(target_id); _LAST_REFRESH[target_id] = time.time()
         for sib in siblings:
             async with _lock(sib):
                 _FPS[sib] = [fp for fp, _ in fps][:FP_MAX_KEEP]
+            _FPS_MID[sib] = {fp: mid for fp, mid in fps}
             _INDEXED.add(sib); _LAST_REFRESH[sib] = time.time()
             await init_cover_fp(sib, db2_id, fps, count, round(time.time() - t0, 1))
         log.info("dedup: target %s indexed — %d fp from DB2 %s (+%d sibling(s))",

@@ -185,10 +185,11 @@ async def _parallel_pass(sm, target, cfg, last_id, pass_gen):
             # DB2 mirror). Marked non-post so the watermark advances.
             _dup = await dedup.already_indexed(target, msg.message or "")
             if _dup:
-                _mfp, _score = _dup
+                _mfp, _score = _dup[0], _dup[1]
+                _db2_mid = _dup[2] if len(_dup) > 2 else None
                 log.info("DUP SKIP: msg %s already in DB2 (%.1f%% match) — not scraped",
                          msg.id, _score)
-                await dedup.record_skip(target, msg.id, _score, _mfp)
+                await dedup.record_skip(target, msg.id, _score, _mfp, _db2_mid)
                 collected.append((msg.id, False, None))
             else:
                 log.info("POST FOUND: msg %s — queued for a parallel worker", msg.id)
@@ -200,8 +201,22 @@ async def _parallel_pass(sm, target, cfg, last_id, pass_gen):
         # v39.1: SAY it when a resumed target simply has nothing new — the
         # #1 'resumed but nothing happened' mystery is a channel whose resume
         # point is already at the newest message (nothing to scrape)
-        log.info("parallel: target %s caught up — scanned %d msg(s) from id %s, no new posts",
-                 target, len(collected), last_id)
+        # v46.1: even with nothing to scrape, persist the watermark so the
+        # /targets board shows the LIVE cursor (dup-skips advance the saved
+        # position instead of leaving it stale).
+        if collected:
+            _new_wm = max(m for m, _p, _m2 in collected)
+            if _new_wm > last_id:
+                try:
+                    await DB.set_progress(target, _new_wm)
+                    log.info("parallel: target %s watermark advanced %s -> %s "
+                             "(no new posts — skips persisted)", target, last_id, _new_wm)
+                except Exception as e:
+                    log.warning("parallel: could not persist watermark for %s (%s)",
+                                target, e)
+        else:
+            log.info("parallel: target %s caught up — scanned 0 msg(s) from id %s, no new posts",
+                     target, last_id)
         return
     log.info("parallel: %d pending post(s) on target %s across %d account(s)",
              len(pending), target, sm.count())
@@ -366,10 +381,11 @@ async def scrape_loop(sm):
                 # parallel gate above; progress advances like a normal skip
                 _dup = await dedup.already_indexed(target, msg.message or "")
                 if _dup:
-                    _mfp, _score = _dup
+                    _mfp, _score = _dup[0], _dup[1]
+                    _db2_mid = _dup[2] if len(_dup) > 2 else None
                     log.info("DUP SKIP: msg %s already in DB2 (%.1f%% match) — progress advanced",
                              msg.id, _score)
-                    await dedup.record_skip(target, msg.id, _score, _mfp)
+                    await dedup.record_skip(target, msg.id, _score, _mfp, _db2_mid)
                     await DB.set_progress(target, msg.id)
                     continue
                 log.info("POST FOUND: msg %s — starting download flow", msg.id)
