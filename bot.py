@@ -190,6 +190,11 @@ async def _parallel_pass(sm, target, cfg, last_id, pass_gen):
                 log.info("DUP SKIP: msg %s already in DB2 (%.1f%% match) — not scraped",
                          msg.id, _score)
                 await dedup.record_skip(target, msg.id, _score, _mfp, _db2_mid)
+                # v46.2: a dup-SKIP is 'handled' too — bump last_post so the
+                # /targets board title link opens the LATEST handled message
+                # (scraped or skipped), not the last scraped one.
+                try: await DB.set_last_post(target, msg.id)
+                except Exception: pass
                 collected.append((msg.id, False, None))
             else:
                 log.info("POST FOUND: msg %s — queued for a parallel worker", msg.id)
@@ -386,6 +391,9 @@ async def scrape_loop(sm):
                     log.info("DUP SKIP: msg %s already in DB2 (%.1f%% match) — progress advanced",
                              msg.id, _score)
                     await dedup.record_skip(target, msg.id, _score, _mfp, _db2_mid)
+                    # v46.2: keep the board title link live on skips too
+                    try: await DB.set_last_post(target, msg.id)
+                    except Exception: pass
                     await DB.set_progress(target, msg.id)
                     continue
                 log.info("POST FOUND: msg %s — starting download flow", msg.id)
