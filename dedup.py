@@ -16,6 +16,43 @@ v46 additions (all backwards-compatible):
     summary. Remember() now retries the Mongo push and warns loudly on failure.
 """
 import asyncio, logging, re, time, unicodedata
+
+
+def set_admin_ids(admin_ids):
+    """v49: configure the admin list for POSSIBLE DUPLICATE alerts."""
+    global _ADMIN_IDS
+    _ADMIN_IDS = tuple(int(x) for x in (admin_ids or []) if str(x).strip())
+
+def _get_admin_ids():
+    return _ADMIN_IDS
+
+async def _send_admin_dm_stub(uid, text):
+    try: log.info("dedup: would DM admin %s: %s", uid, text.split(chr(10),1)[0][:120])
+    except Exception: pass
+
+async def record_possible_duplicate(target_id, msg_id, score, match_fp, match_mid=None):
+    """v49: warn admin when a partial-match post slipped past the exact gate.
+    The post is NOT skipped - caller already continued processing."""
+    try:
+        target_link = _chan_link(target_id, msg_id)
+        match_link = _chan_link(target_id, match_mid) if match_mid else "(not recorded)"
+        text = (
+            chr(0x26A0)+chr(0xFE0F)+" *POSSIBLE DUPLICATE*\n"
+            f"\u2022 target: {target_id}\n"
+            f"\u2022 post: {target_link}\n"
+            f"\u2022 match: {score:.1f}% in DB2\n"
+            f"\u2022 DB2 NEAREST: {match_link}\n"
+            f"\u2022 fp: {(match_fp or '')[:160]}\n"
+            "_(post was processed; please review \u0026 delete if it is a real duplicate)_"
+        )
+        async with _DM_LOCK:
+            for uid in (_ADMIN_IDS or ()):
+                try: await _send_admin_dm(uid, text)
+                except Exception as e: log.warning("dedup: alert DM failed (%s)", e)
+        log.info("POS DUPE: msg %s near match %s in DB2 (%.1f%%)", msg_id, match_mid, score)
+    except Exception as e:
+        log.warning("dedup: record_possible_duplicate failed (%s)", e)
+
 import db as DB
 
 log = logging.getLogger("dedup")
@@ -44,6 +81,9 @@ _FPS, _INDEXED, _BUILDING, _LOCKS = {}, set(), {}, {}
 _PENDING_SKIPS, _COUNTS, _DB2_OWNERS = {}, {}, {}
 _LAST_REFRESH = {}         # v46: target_id -> last Mongo->RAM refresh ts
 _DM_LOCK = asyncio.Lock()  # v46: serialize admin DMs (avoid flood bursts)
+import os as _v49os
+_ADMIN_IDS = (int(_v49os.environ.get("ADMIN_USER_ID", 0) or 0),)
+
 _DB2_BY_TARGET = {}        # v46.1: target_id -> db2_id cache (1h) for skip links
 _FPS_MID = {}              # v46.1: target_id -> {fp: db2_msg_id} for match links
 
@@ -98,6 +138,14 @@ _NONSTORY_RE = re.compile(
 
 
 def fingerprint_cover(caption):
+    """v49: keeps episode numbers / ranges / non-Latin script words.
+
+    v46/v48 stripped every pure-digit token and required >=3 chars per token,
+    so "Episode 02", "Episode 03" and "All Episode ! Hindi dubbed 1-8" all
+    collapsed to "overflow episode" and scored a false 100%% match under
+    token_set_ratio. v49 keeps digits 1-4 chars, normalises "1 - 8" / "1-8"
+    / "1\u20138" to a single stable "1-8" token, and accepts unicode >=2
+    chars (Devanagari, Cyrillic, ...)."""
     if not caption: return ""
     head = caption
     if "\u27aa" in head:
@@ -112,8 +160,17 @@ def fingerprint_cover(caption):
     s = re.sub("[\u200b-\u200f\ufeff]", "", s)
     s = re.sub(r"(?:https?://)?\S*(?:t\.me|telegram\.me)/\S+|https?://\S+", " ", s)
     s = re.sub(r"@[A-Za-z0-9_]+", " ", s)
-    toks = re.findall(r"\w+", s)
-    return " ".join(t for t in toks if len(t) >= 3 and not t.isdigit())
+    s = re.sub(r"(\d)\s*[-\u2013\u2014\u2212]\s*(\d)", r"\1-\2", s)
+    toks = re.findall(r"\w+", s, flags=re.UNICODE)
+    out = []
+    for t in toks:
+        if not t: continue
+        if t.isdigit():
+            if len(t) <= 4: out.append(t)
+            continue
+        if len(t) >= 2: out.append(t)
+    return " ".join(out)
+
 
 
 async def get_cover_fp(t):
@@ -240,18 +297,34 @@ async def ensure_index(t):
 
 
 async def find_dup(t, sig):
-    # Returns (match_fp, score, match_db2_mid) or None. match_db2_mid is the
-    # DB2 message id of the matched cover (from first_seen_msg) used for the
-    # tappable 'DB2 SAME POST' link. Old indexes store fp as strings -> None.
+    """v49: skip ONLY on exact 100%% match (token-for-token equality after
+    v49 normalisation). Fuzzy scores are diagnostic only; the caller uses
+    find_possible_dup for an admin alert WITHOUT skipping the post."""
     if not sig or not await ensure_index(t): return None
     fps = _FPS.get(t) or []
     mids = _FPS_MID.get(t) or {}
     if sig in fps: return sig, 100.0, mids.get(sig)
-    best, best_fp = 0.0, None
+    return None
+
+
+async def find_possible_dup(t, sig):
+    """Highest fuzzy score in index (>=60%%). Also against the legacy
+    digits-stripped form so old DB2 indexes still fire a notice. The caller
+    records an admin alert and CONTINUES processing."""
+    if not sig: return None
+    fps = _FPS.get(t) or []
+    mids = _FPS_MID.get(t) or {}
+    best, best_fp, best_mid = 0.0, None, None
     for fp in fps:
-        r = _ratio(sig, fp)
-        if r > best: best, best_fp = r, fp
-    return (best_fp, round(best, 1), mids.get(best_fp)) if best >= DUP_THRESHOLD else None
+        legacy = re.sub(r"\b\d+(?:-\d+)?\b", " ", fp)
+        legacy = re.sub(r"\s{2,}", " ", legacy).strip()
+        sn = _ratio(sig, fp)
+        sl = _ratio(sig, legacy) if legacy else 0.0
+        s = max(sn, sl)
+        if s > best: best, best_fp, best_mid = s, fp, mids.get(fp)
+    if best < 60.0: return None
+    return best_fp, round(best, 1), best_mid
+
 
 
 async def remember(t, fp, mid, db2_id=None):

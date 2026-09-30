@@ -1,3 +1,4 @@
+import os
 """bot.py — entry point: session, commands, health server, main scrape loop.
 v3: FloodWait-safe startup — on FloodWaitError the process SLEEPS IN-PLACE
 (instead of crashing), so Render never enters a crash-restart loop that keeps
@@ -185,14 +186,9 @@ async def _parallel_pass(sm, target, cfg, last_id, pass_gen):
             # DB2 mirror). Marked non-post so the watermark advances.
             _dup = await dedup.already_indexed(target, msg.message or "")
             if _dup:
-                _mfp, _score = _dup[0], _dup[1]
-                _db2_mid = _dup[2] if len(_dup) > 2 else None
-                log.info("DUP SKIP: msg %s already in DB2 (%.1f%% match) — not scraped",
-                         msg.id, _score)
-                await dedup.record_skip(target, msg.id, _score, _mfp, _db2_mid)
+                logging.info("DUP SKIP: msg %s already in DB2 (100%% exact match) -- skipped", msg.id)
+                await dedup.record_skip(target, msg.id, 100.0, _dup[0], _dup[2] if len(_dup) > 2 else None)
                 # v46.2: a dup-SKIP is 'handled' too — bump last_post so the
-                # /targets board title link opens the LATEST handled message
-                # (scraped or skipped), not the last scraped one.
                 try: await DB.set_last_post(target, msg.id)
                 except Exception: pass
                 collected.append((msg.id, False, None))
@@ -200,6 +196,13 @@ async def _parallel_pass(sm, target, cfg, last_id, pass_gen):
                 log.info("POST FOUND: msg %s — queued for a parallel worker", msg.id)
                 collected.append((msg.id, True, msg))
                 pending.append(msg)
+
+            # v49: partial / near match -> alert admin, still process.
+            _p = await dedup.find_possible_dup(target, msg.message or "")
+            if _p:
+                mfp, sc, mmid = _p
+                logging.info("POSSIBLE DUPE: msg %s near %s in DB2 (%.1f%%) -- processing", msg.id, mmid, sc)
+                await dedup.record_possible_duplicate(target, msg.id, sc, mfp, mmid)
         if len(collected) >= 500 or len(pending) >= 200:
             break  # bound one pass; the next pass continues from the watermark
     if not pending:
@@ -386,16 +389,21 @@ async def scrape_loop(sm):
                 # parallel gate above; progress advances like a normal skip
                 _dup = await dedup.already_indexed(target, msg.message or "")
                 if _dup:
-                    _mfp, _score = _dup[0], _dup[1]
-                    _db2_mid = _dup[2] if len(_dup) > 2 else None
-                    log.info("DUP SKIP: msg %s already in DB2 (%.1f%% match) — progress advanced",
-                             msg.id, _score)
-                    await dedup.record_skip(target, msg.id, _score, _mfp, _db2_mid)
+                    logging.info("DUP SKIP: msg %s already in DB2 (100%% exact match) -- skipped", msg.id)
+                    await dedup.record_skip(target, msg.id, 100.0, _dup[0], _dup[2] if len(_dup) > 2 else None)
                     # v46.2: keep the board title link live on skips too
                     try: await DB.set_last_post(target, msg.id)
                     except Exception: pass
                     await DB.set_progress(target, msg.id)
                     continue
+
+                # v49: partial / near match -> alert admin, still process.
+                _p = await dedup.find_possible_dup(target, msg.message or "")
+                if _p:
+                    mfp, sc, mmid = _p
+                    logging.info("POSSIBLE DUPE: msg %s near %s in DB2 (%.1f%%) -- processing", msg.id, mmid, sc)
+                    await dedup.record_possible_duplicate(target, msg.id, sc, mfp, mmid)
+
                 log.info("POST FOUND: msg %s — starting download flow", msg.id)
                 state.current_post = msg.id
                 try:
@@ -536,3 +544,20 @@ def run():
 
 if __name__ == "__main__":
     run()
+
+# ---- v49: admin DM sender (real Telethon) + ADMIN_USER_ID wiring -------
+async def _v49_send_admin_dm(uid, text):
+    global bot
+    if bot is None: return
+    try:
+        await bot.send_message(int(uid), text, parse_mode='md')
+    except Exception as _e:
+        try:
+            from telethon.errors import FloodWaitError as _fw
+            if isinstance(_e, _fw):
+                await asyncio.sleep(min(getattr(_e,'seconds',60), 60)+5)
+                await bot.send_message(int(uid), text, parse_mode='md')
+        except Exception: pass
+
+dedup._send_admin_dm = _v49_send_admin_dm
+dedup.set_admin_ids([int(x) for x in str(__import__('os').environ.get('ADMIN_USER_ID','0')).split(',') if x.strip()])
