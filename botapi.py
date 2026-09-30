@@ -675,22 +675,139 @@ def register(scrape_client, sm=None):
         await MTM.add_bots(scrape_client, ev, _parse_chat_id(channel), bots)
 
     # ---------- DB2 clean mirror (BOT copies DB -> DB2, credits stripped) ----------
+    # v48 #1 - @mentions are no longer DELETED: every handle becomes
+    # MENTION_REPLACEMENT so the credit becomes yours. Plain "@user",
+    # markdown-wrapped **@user** / __@user__ / `@user`, unicode-styled handles
+    # (math-bold "@\U0001D63C\U0001D63F\U0001D692\U0001D62D...", monospace, small
+    # caps) and fullwidth "\uff20user" are all caught: the STYLING is folded to
+    # ASCII first (NFKD + combining marks + small caps + Greek/Cyrillic
+    # homoglyphs) and the \w class then matches whatever remains.
+    # v48 #2 - /avoid used a plain str.replace, so an entry survived whenever the
+    # caption differed in SPACING / LETTER CASE / ".." vs "...", or showed a
+    # STYLED handle. Each entry now gets a word-key AND a separator-blind key,
+    # matched against whole lines (a pasted "12. text" also matches a bare
+    # "text" line, with any list number), then a flexible inline pass clears the
+    # rest. Lines left with no letter at all (bare "1.", "\u2501\u2501\u2501"
+    # rules, emoji-only residue) are dropped.
+    import unicodedata as _ud
+    MENTION_REPLACEMENT = "@NSFW_Universe"
     _URL_RE = re.compile(r"(?:https?://)?(?:t\.me|telegram\.me)/\S+|https?://\S+")
-    _MENTION_RE = re.compile(r"@[A-Za-z0-9_]+")
+    _MENTION_RE = re.compile(r"[@\uff20\ufe6b](?:\w*[^\W_])?")
+    # the caption goes to DB2 as PLAIN text so they were literal characters.
+    # markdown wrappers around a handle (**@user** / __@user__ / `@user`) are
+    # dropped as well - the caption reaches DB2 as PLAIN text, so those
+    # characters were literal. Built from re.escape() to stay readable.
+    # markdown wrappers around a handle (**@user** / __@user__ / `@user`) are
+    # dropped as well - the caption reaches DB2 as PLAIN text, so those
+    # characters were literal. Built from re.escape() to stay readable.
+    _MENT_WRAP_RE = re.compile("([*_`]{1,3})" + re.escape(MENTION_REPLACEMENT) + "([*_`]{1,3})")
+    _LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
+    _MARKS_RE = re.compile(r"[\u0300-\u036f\u200b-\u200f\ufeff]")
+    _PUNCT_RE = re.compile(r"[\W_]+", re.UNICODE)
+    _NUMBULLET_RE = re.compile(r"^\s*\d{1,3}[.)]\s+(.+)$", re.S)
+    _DOTS_RE = re.compile(r"\.{2,}|\u2026")
+    _SMALLCAP = str.maketrans({"\u01c8": "j", "\u01cb": "j", "\u01dd": "e", "\u01f2": "z", "\u0237": "j", "\u1d00": "a", "\u1d03": "b", "\u1d04": "c", "\u1d05": "d", "\u1d07": "e", "\u1d08": "e", "\u1d09": "i", "\u1d0a": "j", "\u1d0b": "k", "\u1d0d": "m", "\u1d0e": "n", "\u1d0f": "o", "\u1d10": "o", "\u1d11": "o", "\u1d12": "o", "\u1d16": "o", "\u1d17": "o", "\u1d18": "p", "\u1d19": "r", "\u1d1a": "r", "\u1d1b": "t", "\u1d1c": "u", "\u1d1d": "u", "\u1d1e": "u", "\u1d1f": "m", "\u1d20": "v", "\u1d21": "w", "\u1d22": "z", "\u1d43": "a", "\u1d44": "a", "\u1d47": "b", "\u1d48": "d", "\u1d49": "e", "\u1d4b": "e", "\u1d4c": "e", "\u1d4d": "g", "\u1d4e": "i", "\u1d4f": "k", "\u1d50": "m", "\u1d52": "o", "\u1d53": "o", "\u1d54": "o", "\u1d55": "o", "\u1d56": "p", "\u1d57": "t", "\u1d58": "u", "\u1d59": "u", "\u1d5a": "m", "\u1d5b": "v", "\u1d62": "i", "\u1d63": "r", "\u1d64": "u", "\u1d65": "v", "\u1d77": "g", "\u1d79": "g", "\ua730": "f", "\ua731": "s", "\ua747": "l", "\ua763": "z", "\ua77a": "d", "\ua77c": "f", "\ua77f": "g", "\ua781": "l", "\ua783": "r", "\ua785": "s", "\ua787": "t", "\ua7ae": "i", "\ua7af": "q", "\ua7bb": "a", "\ua7bd": "i", "\ua7bf": "u", "\ua7c1": "o", "\ua7c3": "w", "\ua7d1": "g", "\ua7d7": "s", "\ua7d9": "s", "\ua7f6": "h", "\ua7fa": "m"})
+    _HOMO = str.maketrans({"\u0391": "a", "\u0392": "b", "\u0395": "e", "\u0396": "z", "\u0397": "h", "\u0399": "i", "\u039a": "k", "\u039c": "m", "\u039d": "n", "\u039f": "o", "\u03a1": "p", "\u03a4": "t", "\u03a5": "y", "\u03a7": "x", "\u03b1": "a", "\u03b2": "b", "\u03b3": "y", "\u03b4": "d", "\u03b5": "e", "\u03b6": "z", "\u03b7": "n", "\u03b8": "o", "\u03b9": "i", "\u03ba": "k", "\u03bb": "l", "\u03bc": "u", "\u03bd": "v", "\u03be": "x", "\u03bf": "o", "\u03c0": "n", "\u03c1": "p", "\u03c2": "s", "\u03c3": "o", "\u03c4": "t", "\u03c5": "u", "\u03c6": "f", "\u03c7": "x", "\u03c8": "y", "\u03c9": "w", "\u03ca": "i", "\u03cb": "u", "\u0430": "a", "\u0432": "b", "\u0435": "e", "\u043a": "k", "\u043c": "m", "\u043d": "h", "\u043e": "o", "\u0440": "p", "\u0441": "c", "\u0442": "t", "\u0443": "y", "\u0445": "x", "\u0455": "s", "\u0456": "i", "\uff41": "a"})
+
+    def _fold(s):
+        """NFKD-fold to plain ASCII: styled letters, small caps and Greek/Cyrillic
+        look-alikes (monospace \U0001D698 -> Greek omicron) all collapse."""
+        return _MARKS_RE.sub("", _ud.normalize("NFKD", s or "")).translate(_SMALLCAP).translate(_HOMO)
+
+    def _cmp_key(s):
+        """Word key for avoid matching: case, emoji, punctuation, list numbers and
+        lining rules are all irrelevant - only the words remain."""
+        s = _fold(s).lower()
+        s = re.sub(r"^\s*\d{1,3}[.)]\s+", "", s)
+        s = _DOTS_RE.sub(" ", s)
+        s = _PUNCT_RE.sub(" ", s)
+        return " ".join(s.split())
+
+    def _sq_key(s):
+        """Separator-blind key: '_' '-' '.' and spaces all vanish, so
+        'adult_horizon' == 'adult horizon' == 'AdultHorizon'."""
+        s = _fold(s).lower()
+        s = re.sub(r"^\s*\d{1,3}[.)]\s+", "", s)
+        return re.sub(r"[\W_]+", "", s)
+
+    def _flex_avoid(a):
+        """Whitespace/case/dot-tolerant regex source for one /avoid string, so
+        'Due TO COPYRIGHT ISSUES..' also matches 'Due To COPYRIGHT ISSUES...'."""
+        toks = [x for x in re.split(r"\s+", _fold(a).strip()) if x]
+        if not toks:
+            return None
+        parts = []
+        for tok in toks:
+            esc = re.escape(tok)
+            flexed = _DOTS_RE.sub(lambda _m: "[.\u2026]{0,5}", esc)
+            if not flexed or flexed == "[.\u2026]{0,5}":
+                flexed = esc                        # pure-punctuation token: exact
+            parts.append(flexed)
+        return r"\s*".join(parts)
+
+    def _swap_mentions(t):
+        """Every @handle becomes MENTION_REPLACEMENT - never dropped."""
+        t = _MENTION_RE.sub(MENTION_REPLACEMENT, t)
+        return _MENT_WRAP_RE.sub(MENTION_REPLACEMENT, t)
+
+    def _strip_avoids(t, avoids):
+        """Remove /avoid strings: whole-line match first (word key, then
+        separator-blind key), then the flexible inline pass for text embedded
+        inside a longer line."""
+        if not avoids:
+            return t
+        variants = []
+        for a in avoids:
+            a = (a or "").strip()
+            if not a:
+                continue
+            variants.append(a)
+            m_num = _NUMBULLET_RE.match(a)          # a pasted "12. text"
+            if m_num:
+                variants.append(m_num.group(1).strip())
+        keys = [k for k in (_cmp_key(v) for v in variants) if k]
+        sqs = [q for q in (_sq_key(v) for v in variants) if q]
+        if keys or sqs:
+            keep = []
+            for ln in t.splitlines():
+                nl, nq = _cmp_key(ln), _sq_key(ln)
+                hit = False
+                for k in keys:                      # word-key pass
+                    if nl and (nl == k or (k in nl and len(k) >= 0.5 * len(nl))):
+                        hit = True
+                        break
+                if not hit:                         # separator-blind pass
+                    for q in sqs:
+                        if nq and (nq == q or (q in nq and len(q) >= 0.5 * len(nq))):
+                            hit = True
+                            break
+                if not hit:
+                    keep.append(ln)
+            t = "\n".join(keep)
+        for v in variants:                          # inline leftovers
+            if v in t:
+                t = t.replace(v, " ")
+            pat = _flex_avoid(v)
+            if pat:
+                t = re.sub(pat, " ", t, flags=re.I | re.UNICODE)
+        return re.sub(r"[ \t]{2,}", " ", t)
 
     def _clean_caption(text, avoids):
-        """Strip custom avoid-strings, all URLs (t.me + http) and @mentions from
-        a caption, then tidy leftover whitespace. Sent as plain text, so any
-        embedded-link formatting in the original dies with the entities."""
-        t = text or ""
-        for a in avoids or []:
-            t = t.replace(a, "")
+        """Strip /avoid strings, strip URLs, rewrite every @mention to
+        MENTION_REPLACEMENT, drop lines with no letters at all, tidy whitespace.
+        Sent as plain text, so embedded-link formatting dies with the entities."""
+        t = _strip_avoids(text or "", avoids)
         t = _URL_RE.sub("", t)
-        t = _MENTION_RE.sub("", t)
+        t = _swap_mentions(t)
+        kept = []
+        for ln in t.splitlines():
+            if ln.strip() and not _LETTER_RE.search(ln):
+                continue        # bare "1." / "\u2501\u2501\u2501" rule / emoji-only
+            kept.append(ln)
+        t = "\n".join(kept)
         t = re.sub(r"[ \t]+\n", "\n", t)
         t = re.sub(r"\n{3,}", "\n\n", t)
         return t.strip()
-
     _DB2_CACHE = {"ts": 0.0, "map": {}}
 
     async def _db2_map():

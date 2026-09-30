@@ -1,4 +1,50 @@
 ================================================================================
+v48 - CAPTION REWRITE + WORKING /avoid (Render bot)
+================================================================================
+Files changed: botapi.py  (README.md, README_PATCH.txt updated). No other file
+touched. Deploy: replace botapi.py in the repo root and redeploy Render.
+
+FIX 1 - every @username in a DB->DB2 caption becomes @NSFW_Universe
+  * _clean_caption no longer DELETES handles; _swap_mentions rewrites them.
+  * Catches plain "@user", markdown-wrapped **@user** / __@user__ / `@user`,
+    unicode-styled handles (math-sans-bold @𝘼𝘿... "adult",
+    small caps, circled letters), fullwidth "＠user" and "@user_bot".
+  * Styling is folded away first (NFKD + combining-mark strip), so a styled
+    handle folds to its ASCII letters before the swap.
+  * A caption already containing @NSFW_Universe is left untouched (no doubling).
+  * URLs (t.me / telegram.me / http) are still stripped exactly as before.
+
+FIX 2 - /avoid and /avoidtext now actually strip text out of captions
+  WHY IT FAILED: the old code did `t.replace(a, "")` - a byte-exact match. Your
+  entries ("Bagairat 1 And 2 Full Movie...", "You😂 naughty 😈 And
+  Something", "💗Channel -@AdultX_Horizon", "Due TO COPYRIGHT ISSUES..")
+  never matched the live caption because the CAPTION differed in SPACING, LETTER
+  CASE, ".." vs "...", or used a unicode-STYLED handle instead of ASCII.
+  NOTE: text sent as its OWN message was already dropped; only caption text
+  survived - exactly the symptom reported.
+
+  NEW MATCHING (two passes per avoid string):
+   1) whole-line pass - line key = NFKD-fold, lowercase, strip leading list
+      number, drop all punctuation/emoji; an entry matches a line when the key
+      equals the line key OR covers >=50% of it. So "12. text" also matches a
+      bare "text" line, ANY list number matches, and "Due TO COPYRIGHT ISSUES.."
+      matches "...ISSUES..." in the caption.
+   2) inline pass - whitespace- and dot-flexible regex (re.I) over the line,
+      using the folded entry, so embedded occurrences are removed too.
+  LEFT-OVER DEBRIS: after the strip, any line with no LETTER left at all is
+  removed - bare "1." / "8." list numbers, "┏━━━" rule lines
+  and emoji-only residue can no longer reappear in DB2. Normal lines such as
+  "1080p Sub MKV | Episode 3" are never touched.
+
+TESTS RUN IN SANDBOX (real _clean_caption extracted from the patched file):
+  20/20 checks pass - 6 mention cases (plain, styled, bold, mono, fullwidth,
+  styled+underscore), 8 /avoid cases (exact, case+dots, multiline, numbered
+  paste, styled-vs-ASCII, dash+renumbered, rule dust, handle-only), 6 end-to-end
+  checks (realistic DB2 caption, idempotency, no over-strip, all-avoided -> empty,
+  long caption preserved). All 14 repo modules compile.
+================================================================================
+
+================================================================================
 v46 — DUPLICATE-DETECTION HARDENING (Render bot)
 ================================================================================
 Files changed: dedup.py, botapi.py (README.md, README_PATCH.txt updated).
