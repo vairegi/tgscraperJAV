@@ -1,4 +1,36 @@
 ================================================================================
+v50 - DUPLICATE-SKIP LINK FIX + ALERT CLEANUP (Render bot)
+================================================================================
+Files changed: dedup.py, bot.py  (README_PATCH.txt updated). Deploy: replace
+both files in the repo root and redeploy Render.
+AFTER DEPLOY: run /dupescan once per DB2 channel (5 total). 342 of 477 stored
+fingerprints are still the OLD v46 format, which v49's exact-match gate can
+never hit — this is why real duplicates were being processed again. One
+/dupescan per DB2 rewrites them in v49 format and restores the correct DB2
+message ids. It only touches the fingerprint index, never your channels.
+
+FIX 1 - skip alerts now link to the REAL DB2 post (dedup.py)
+  WHY IT WAS WRONG: note_scraped() fed the TARGET channel's message id into
+  the fingerprint->message-id map, and remember() blindly overwrote whatever
+  DB2 id was already stored (by the DB2 mirror hook / DB2 scan). A later
+  scrape of the same cover on any sibling target stamped e.g. "389" (a target
+  msg id); the alert glued it onto the DB2 channel id -> t.me/c/<db2>/389,
+  pointing at an UNRELATED DB2 post. Detection itself was correct (exact
+  fingerprint match); only the reported link was wrong.
+  * note_scraped() no longer passes a message id (target ids are not DB2 ids).
+  * remember() is first-wins for the msg id and never stores a 0.
+  * "(not recorded)" alerts now tell you to run /dupescan to rebuild.
+
+FIX 2 - no more double DM on skipped dupes (bot.py, parallel path)
+  find_possible_dup ran even when the exact gate had already skipped the post,
+  so every "DUPLICATE SKIPPED" DM was followed by a confusing "POSSIBLE
+  DUPLICATE" DM for the same post. The check now lives inside the else-branch:
+  it only fires when the post was NOT an exact duplicate.
+
+FIX 3 - possible-dup noise floor raised 60% -> 80% (dedup.py)
+  Unrelated captions share generic words and were tripping the 60% floor.
+
+================================================================================
 v48 - CAPTION REWRITE + WORKING /avoid (Render bot)
 ================================================================================
 Files changed: botapi.py  (README.md, README_PATCH.txt updated). No other file

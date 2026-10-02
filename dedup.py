@@ -308,9 +308,10 @@ async def find_dup(t, sig):
 
 
 async def find_possible_dup(t, sig):
-    """Highest fuzzy score in index (>=60%%). Also against the legacy
-    digits-stripped form so old DB2 indexes still fire a notice. The caller
-    records an admin alert and CONTINUES processing."""
+    """Highest fuzzy score in index (>=80%%; v50: raised from 60%% — unrelated
+    captions share generic words and were tripping the 60%% floor). Also
+    against the legacy digits-stripped form so old DB2 indexes still fire a
+    notice. The caller records an admin alert and CONTINUES processing."""
     if not sig: return None
     fps = _FPS.get(t) or []
     mids = _FPS_MID.get(t) or {}
@@ -322,7 +323,7 @@ async def find_possible_dup(t, sig):
         sl = _ratio(sig, legacy) if legacy else 0.0
         s = max(sn, sl)
         if s > best: best, best_fp, best_mid = s, fp, mids.get(fp)
-    if best < 60.0: return None
+    if best < 80.0: return None  # v50: POSSIBLE floor 60 -> 80
     return best_fp, round(best, 1), best_mid
 
 
@@ -344,7 +345,8 @@ async def remember(t, fp, mid, db2_id=None):
             lst = _FPS.setdefault(tid, [])
             if fp not in lst:
                 lst.insert(0, fp); del lst[FP_MAX_KEEP:]
-            _FPS_MID.setdefault(tid, {})[fp] = mid
+            if mid:  # v50: first-wins — a real DB2 msg id (mirror hook / DB2
+                _FPS_MID.setdefault(tid, {}).setdefault(fp, mid)  # scan) is never clobbered
         for attempt in range(2):
             try:
                 await add_cover_fp(tid, fp, mid)
@@ -364,8 +366,13 @@ async def already_indexed(target_id, caption):
         return None
 
 
-async def note_scraped(target_id, caption, mid, db2_id=None):
-    try: await remember(target_id, fingerprint_cover(caption), mid, db2_id=db2_id)
+async def note_scraped(target_id, caption, mid=None, db2_id=None):
+    """v50: 'mid' here is a TARGET-channel message id, NOT a DB2 id — v46
+    stored it as the match link, so skip alerts pointed at an unrelated DB2
+    post (e.g. t.me/c/<db2>/389 when the real DB2 copy was /2606). We still
+    remember the fingerprint so a future repost is gated; the DB2 msg id is
+    recorded ONLY by the DB2 mirror hook and the DB2 scans, which have it."""
+    try: await remember(target_id, fingerprint_cover(caption), 0, db2_id=db2_id)
     except Exception as e: log.warning("dedup: remember failed (%s)", e)
 
 
@@ -478,7 +485,7 @@ async def _instant_skip_alert(target_id, msg_id, score, match_fp, match_mid):
     if not INSTANT_SKIP_ALERT: return
     db2 = await _db2_for(target_id)
     tgt = _chan_link(target_id, msg_id)
-    db2l = _chan_link(db2, match_mid) if (db2 and match_mid) else "(not recorded — old index)"
+    db2l = _chan_link(db2, match_mid) if (db2 and match_mid) else "(not recorded — run /dupescan once to rebuild the index)"
     txt = (f"🔁 *DUPLICATE SKIPPED*\n"
            f"• target: `{target_id}`\n"
            f"• post: {tgt}\n"

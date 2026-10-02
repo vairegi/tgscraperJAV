@@ -197,12 +197,15 @@ async def _parallel_pass(sm, target, cfg, last_id, pass_gen):
                 collected.append((msg.id, True, msg))
                 pending.append(msg)
 
-            # v49: partial / near match -> alert admin, still process.
-            _p = await dedup.find_possible_dup(target, msg.message or "")
-            if _p:
-                mfp, sc, mmid = _p
-                logging.info("POSSIBLE DUPE: msg %s near %s in DB2 (%.1f%%) -- processing", msg.id, mmid, sc)
-                await dedup.record_possible_duplicate(target, msg.id, sc, mfp, mmid)
+                # v50: partial / near match -> alert admin, still process.
+                # Moved INSIDE the else: v49 ran this even after an exact-match
+                # skip, so every skipped dupe fired a second, confusing
+                # "POSSIBLE DUPLICATE" DM on top of the "DUPLICATE SKIPPED" DM.
+                _p = await dedup.find_possible_dup(target, msg.message or "")
+                if _p:
+                    mfp, sc, mmid = _p
+                    logging.info("POSSIBLE DUPE: msg %s near %s in DB2 (%.1f%%) -- processing", msg.id, mmid, sc)
+                    await dedup.record_possible_duplicate(target, msg.id, sc, mfp, mmid)
         if len(collected) >= 500 or len(pending) >= 200:
             break  # bound one pass; the next pass continues from the watermark
     if not pending:
