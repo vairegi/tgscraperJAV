@@ -65,11 +65,11 @@ async def add_target(tid, db_id=None, link_mode="button", link_trigger=None):
                 t["db_id"] = db_id
             if link_mode:
                 t["link_mode"] = link_mode
-                t["link_trigger"] = link_trigger if link_mode == "caption" else None
+                t["link_trigger"] = link_trigger if link_mode in ("caption", "button") else None  # v51: button text too
             return await _save_targets(targets)
     targets.append({"id": tid, "db_id": db_id, "db2_id": None, "avoid": [],
                     "link_mode": link_mode or "button",
-                    "link_trigger": link_trigger if link_mode == "caption" else None})
+                    "link_trigger": link_trigger if link_mode in ("caption", "button") else None})  # v51
     return await _save_targets(targets)
 
 async def remove_target(tid):
@@ -103,7 +103,7 @@ async def set_target_link_mode(tid, mode, trigger=None):
     for t in targets:
         if t["id"] == tid:
             t["link_mode"] = mode
-            t["link_trigger"] = trigger if mode == "caption" else None
+            t["link_trigger"] = trigger if mode in ("caption", "button") else None  # v51
             return await _save_targets(targets)
     return None  # target not found
 

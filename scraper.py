@@ -67,7 +67,9 @@ def is_post(msg, link_mode="button", link_trigger=None):
         return find_caption_url(msg, link_trigger) is not None
     if not msg.buttons:
         return False
-    return find_button(msg, BTN_DOWNLOAD) is not None
+    # v51: button mode honours a custom button text (link_trigger) — some
+    # channels label the link button "Join" / "Watch Now" instead of Download.
+    return find_button(msg, link_trigger or BTN_DOWNLOAD) is not None
 
 
 def why_not_post(msg, link_mode="button", link_trigger=None):
@@ -86,9 +88,10 @@ def why_not_post(msg, link_mode="button", link_trigger=None):
         return ""
     if not msg.buttons:
         return "no buttons"
-    if find_button(msg, BTN_DOWNLOAD) is None:
+    if find_button(msg, link_trigger or BTN_DOWNLOAD) is None:  # v51
         texts = [getattr(b, "text", "") for row in (msg.buttons or []) for b in row]
-        return "no Download button (buttons: " + ", ".join(texts[:4]) + ")"
+        return (f"no {link_trigger or BTN_DOWNLOAD!r} button (buttons: "
+                + ", ".join(texts[:4]) + ")")
     return ""
 
 

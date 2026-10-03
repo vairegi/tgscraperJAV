@@ -333,10 +333,11 @@ async def _collect_media(client, entity, after_id, max_wait=90, quiet=5):
             f"{max_wait}s (stickers/text only) — not archiving this post")
     return media
 
-def _peek_link_bot(msg):
-    """Read the LINK_BOT username from the Download button's URL WITHOUT
-    clicking it — so we know which chat to wait on before the button fires."""
-    found = find_button(msg, BTN_DOWNLOAD)
+def _peek_link_bot(msg, needle=None):
+    """Read the LINK_BOT username from the link button's URL WITHOUT clicking
+    it. v51: `needle` = the target's custom button text (link_trigger); default
+    stays BTN_DOWNLOAD."""
+    found = find_button(msg, needle or BTN_DOWNLOAD)
     if not found:
         return None
     _, _, b = found
@@ -423,7 +424,7 @@ async def process_post(client, cfg, msg, worker_name=None):
         # LINK_BOT is DISCOVERED from THIS post's Download button (per target).
         # The env-var FUBUKI_BOT stays only as a last-resort fallback for weird
         # posts where the button isn't a t.me deep link.
-        link_bot = _peek_link_bot(msg) or FUBUKI_BOT
+        link_bot = _peek_link_bot(msg, link_trigger) or FUBUKI_BOT
         if not link_bot:
             raise RuntimeError(
                 "Download button carries no t.me/<bot>?start=... link and no "
@@ -434,7 +435,8 @@ async def process_post(client, cfg, msg, worker_name=None):
         #    serves the linked content instead of its generic welcome message
         state.stage = f"clicking Download (LINK_BOT=@{link_bot})"
         base_f = await _last_id(client, link_bot)
-        _, _, followed_bot = await _follow_button(msg, BTN_DOWNLOAD, client)
+        # v51: custom button text (link_trigger) or the default Download
+        _, _, followed_bot = await _follow_button(msg, link_trigger or BTN_DOWNLOAD, client)
         if followed_bot and followed_bot != link_bot:
             # button URL parsed differently than the peek — trust the follow result
             link_bot = followed_bot

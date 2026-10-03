@@ -392,7 +392,7 @@ async def _add_target_with_db(scrape_client, ev, tid, dbid, db2=None,
                       if db2 is not None else "")
                    + (f"\n  Link mode: CAPTION — trigger text: `{link_trigger}`"
                       if link_mode == "caption"
-                      else "\n  Link mode: BUTTON (Download button)")
+                      else f"\n  Link mode: BUTTON — button text: `{link_trigger or 'Download'}`")
                    + "\n\n/targets to view all, /start to scrape.")
     # v45.1: a sibling target already scanned the SAME DB2? share its index
     # instantly — no second scan. Otherwise build once, in the background.
@@ -1701,7 +1701,8 @@ def register(scrape_client, sm=None):
     @bot.on(events.NewMessage(pattern=r"^/targatelinkmode(?:\s+([\s\S]+))?$"))
     async def targatelinkmode_cmd(ev):
         """Change how a target's download link is found, without re-adding it:
-        /targatelinkmode <n> button | /targatelinkmode <n> caption <trigger text>"""
+        /targatelinkmode <n> button [button text] | /targatelinkmode <n> caption <trigger text>
+        v51: button mode takes an optional custom button text (Join / Watch Now ...)."""
         if not await _admin(ev.sender_id):
             return
         targets = await DB.get_targets()
@@ -1714,7 +1715,7 @@ def register(scrape_client, sm=None):
                 or not (1 <= int(parts[0]) <= len(targets))
                 or parts[1].lower() not in ("button", "caption")
                 or (parts[1].lower() == "caption" and (len(parts) < 3 or not parts[2].strip()))):
-            lines = ["Usage:\n  /targatelinkmode <n> button"
+            lines = ["Usage:\n  /targatelinkmode <n> button [button text]"
                      "\n  /targatelinkmode <n> caption <trigger text>\n"]
             for i, t in enumerate(targets):
                 mode = t.get("link_mode") or "button"
@@ -1725,10 +1726,13 @@ def register(scrape_client, sm=None):
             return
         t = targets[int(parts[0]) - 1]
         mode = parts[1].lower()
-        trigger = parts[2].strip() if mode == "caption" else None
+        # v51: button mode also accepts a custom button text
+        trigger = parts[2].strip() if (mode in ("caption", "button") and len(parts) > 2) else None
         await DB.set_target_link_mode(t["id"], mode, trigger)
         await ev.reply(f"✅ Target {int(parts[0])} link mode = **{mode.upper()}**"
-                       + (f" — trigger text: `{trigger}`" if trigger else ""))
+                       + (f" — trigger text: `{trigger}`" if (mode == "caption" and trigger)
+                          else f" — button text: `{trigger}`" if (mode == "button" and trigger)
+                          else ""))
 
     # ---------- v42: media-bot image collection switch ----------
     @bot.on(events.NewMessage(pattern=r"^/keepimages(?:\s+(\S+))?$"))
@@ -2033,9 +2037,19 @@ def register(scrape_client, sm=None):
                                "(fancy Unicode fonts like 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱 are folded, so plain "
                                "text is fine).\nCancel: /cancel")
             else:
-                _pending.pop(ev.sender_id, None)
-                await _add_target_with_db(scrape_client, ev, tid, dbid, db2,
-                                          "button", None)
+                _pending[ev.sender_id] = ("target_btntext", (tid, dbid, db2))
+                await ev.reply("Button mode — send the TEXT on the link button "
+                               "(e.g. `Download`, `Join`, `Watch Now`). Send `skip` "
+                               "to use the default Download. Matched after Unicode-fold, "
+                               "so styled labels (𝗝𝗼𝗶𝗻) are fine.\nCancel: /cancel")
+            return
+        if kind == "target_btntext":  # v51: custom link-button text
+            _pending.pop(ev.sender_id, None)
+            tid, dbid, db2 = extra
+            bt = ev.raw_text.strip()
+            bt = None if bt.lower() in ("skip", "-", "none", "default", "") else bt
+            await _add_target_with_db(scrape_client, ev, tid, dbid, db2,
+                                      "button", bt)
             return
         if kind == "target_trigger":  # v42
             _pending.pop(ev.sender_id, None)

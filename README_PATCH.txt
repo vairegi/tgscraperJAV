@@ -1,4 +1,25 @@
 ================================================================================
+v51 - CUSTOM LINK-BUTTON TEXT PER TARGET (Render bot)
+================================================================================
+Files changed: scraper.py, flow.py, db.py, botapi.py. Deploy: replace all four
+in the repo root and redeploy Render. No data migration — targets without a
+custom text behave exactly as before (Download button).
+
+WHY: button mode hard-assumed the post's link button says "Download". Channels
+whose button says "Join" / "Watch Now" were never detected as posts at all.
+
+WHAT CHANGED:
+  * /target wizard: after you pick Button mode, the bot now asks for the button
+    TEXT (e.g. Download / Join / Watch Now). Send `skip` to keep the default
+    Download. Unicode-styled labels are folded, plain text works.
+  * /targatelinkmode <n> button <text> — set/change it any time without
+    re-adding the target. Caption mode unchanged.
+  * The custom text is stored in the target's existing link_trigger field
+    (db.py), used by post detection (scraper.is_post / why_not_post) AND by the
+    actual click + link-bot peek (flow._follow_button / _peek_link_bot), so the
+    whole chain follows the button the channel really uses.
+
+================================================================================
 v50 - DUPLICATE-SKIP LINK FIX + ALERT CLEANUP (Render bot)
 ================================================================================
 Files changed: dedup.py, bot.py  (README_PATCH.txt updated). Deploy: replace
