@@ -1377,13 +1377,17 @@ def register(scrape_client, sm=None):
         # targets get their cached invite / t.me/c/… member link (any member
         # userbot can view it).
         role_cache = {}
+        # v53: compact TEXT glyphs instead of emoji — emoji cells rendered
+        # oversized on several clients and inflated every row's height.
+        _GLYPH = {"✅": ":)", "👑": "A", "❌": "××", "⚪": "--"}
 
         async def _cached_em(client, cid):
-            """_role emoji cached per (client, chat) — a DB/DB2 shared by
+            """_role glyph cached per (client, chat) — a DB/DB2 shared by
             several targets is checked once, not once per target."""
             key = (id(client), cid)
             if key not in role_cache:
-                role_cache[key] = (await _role(client, cid))[0]
+                em = (await _role(client, cid))[0]
+                role_cache[key] = _GLYPH.get(em, em)
             return role_cache[key]
 
         def _clip(s, n=20):
@@ -1432,26 +1436,26 @@ def register(scrape_client, sm=None):
                        if t.get("db2_id") else None)
             tbl_rows.append(_row(t_title, "T",
                 None,
-                [(await _cached_em(c, t["id"])) if c.is_connected() else "⚪"
+                [(await _cached_em(c, t["id"])) if c.is_connected() else "--"
                  for c in clients], url=t_link))
             if t.get("db_id"):
                 tbl_rows.append(_row(d_title or str(t["db_id"]), "DB",
                     await _cached_em(bot, t["db_id"]),
-                    [(await _cached_em(c, t["db_id"])) if c.is_connected() else "⚪"
+                    [(await _cached_em(c, t["db_id"])) if c.is_connected() else "--"
                      for c in clients], url=d_link))
             if t.get("db2_id"):
                 tbl_rows.append(_row(d2_title or str(t["db2_id"]), "D2",
                     await _cached_em(bot, t["db2_id"]),
-                    [(await _cached_em(c, t["db2_id"])) if c.is_connected() else "⚪"
+                    [(await _cached_em(c, t["db2_id"])) if c.is_connected() else "--"
                      for c in clients], url=d2_link))
 
         wmap = " · ".join(f"{i + 1}={_clip(labels[i], 12)}({srcs[i]})"
                           for i in range(len(clients)))
         foot = (f"WORKERS — live matrix · {len(clients)} worker(s) × "
                 f"{len(targets)} target(s)\n"
-                f"👑 admin · ✅ member · ❌ no access · · n/a — fix ❌: /invite "
-                f"(targets), /add (DB/DB2) · tap a channel name to open it\n"
-                f"🤖={_clip(bot_label, 12)}(bot)"
+                f"A admin · :) member · ×× no access · -- offline · · n/a — "
+                f"fix ××: /invite (targets), /add (DB/DB2) · tap a channel name to open it\n"
+                f"bot={_clip(bot_label, 12)}"
                 + (f" · {wmap}" if wmap else ""))
         try:
             await status.delete()
@@ -1474,20 +1478,20 @@ def register(scrape_client, sm=None):
         if not sent_any:
             # plain-text fallback (chunked — stays sendable at any size)
             lines = [f"📊 WORKERS — {mgr.count()} worker(s) × {len(targets)} target(s)",
-                     "👑 admin · ✅ member · ❌ no access · · n/a", ""]
+                     "A admin · :) member · ×× no access · -- offline · · n/a", ""]
             for t in targets:
                 t_title = await _chat_title(scrape_client, t["id"]) or str(t["id"])
                 lines.append(t_title)
                 lines.append("  T  " + " ".join(
-                    (await _cached_em(c, t["id"])) if c.is_connected() else "⚪"
+                    (await _cached_em(c, t["id"])) if c.is_connected() else "--"
                     for c in clients))
                 if t.get("db_id"):
                     lines.append("  DB " + " ".join(
-                        (await _cached_em(c, t["db_id"])) if c.is_connected() else "⚪"
+                        (await _cached_em(c, t["db_id"])) if c.is_connected() else "--"
                         for c in clients))
                 if t.get("db2_id"):
                     lines.append("  D2 " + " ".join(
-                        (await _cached_em(c, t["db2_id"])) if c.is_connected() else "⚪"
+                        (await _cached_em(c, t["db2_id"])) if c.is_connected() else "--"
                         for c in clients))
             lines += ["", foot]
             txt = "\n".join(lines)

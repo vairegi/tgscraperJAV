@@ -233,40 +233,85 @@ async def _parallel_pass(sm, target, cfg, last_id, pass_gen):
              len(pending), target, sm.count())
     wm = last_id
     resolved = set()
+    # v53: FREE-SLOT dispatcher (replaces the v39 wave barrier). The old loop
+    # awaited gather() on a whole wave, so the wave advanced only when the
+    # SLOWEST account finished — with just a few pending posts the second
+    # userbot sat idle and the log read "acc1 scraping, acc2 resting". Now
+    # every account runs continuously: the moment one finishes a post it
+    # immediately takes the next pending one, so acc1 does post 1 WHILE acc2
+    # does post 2 — neither ever waits on the other. Cover post + its media
+    # still can never interleave between workers: forwarder.delivery_lock(db)
+    # serializes each post's complete bundle (cover FIRST, then all media)
+    # per DB channel — that part is unchanged.
     i = 0
-    while i < len(pending):
+    running = {}            # task -> (account idx, post id)
+    busy = set()            # account idxs currently on a post
+    while i < len(pending) or running:
         if state.abort:
             state.abort = False
             break
         if state.reset_gen != pass_gen or target in state.paused_ids:
             break
-        while state.paused and not state.abort:
-            await asyncio.sleep(2)  # pause = finish in-flight, dispatch nothing new
-        if state.abort:
-            state.abort = False
-            break
-        now = time.time()
-        free = [idx for idx in range(sm.count())
-                if _FLOOD_COOLDOWNS.get(idx, 0) <= now]
-        if not free:
-            wait = max(5, min(_FLOOD_COOLDOWNS.values()) - now)
-            log.warning("parallel: every account flood-parked — sleeping %ds", wait)
-            await asyncio.sleep(wait)
-            continue
-        batch = pending[i:i + len(free)]
-        # v39.1: log every wave so the Render log shows parallel activity
-        log.info("parallel wave: posts %s -> accounts %s",
-                 [m.id for m in batch], [f"acc{idx + 1}" for idx in free[:len(batch)]])
-        tasks = []
-        for k, msg in enumerate(batch):
-            idx = free[k]
-            tasks.append(asyncio.ensure_future(_parallel_one(
-                sm.all()[idx], cfg, msg, idx, f"acc{idx + 1}/{sm.count()}", resolved)))
-        await asyncio.gather(*tasks, return_exceptions=True)
-        if state.abort:
-            state.abort = False  # /skip aborted the whole wave — already recorded
-        i += len(batch)
+        if state.paused:
+            # /pause = in-flight posts finish, no new dispatch
+            if running:
+                done, _ = await asyncio.wait(
+                    list(running), return_when=asyncio.FIRST_COMPLETED)
+                for t in done:
+                    idx, _mid = running.pop(t)
+                    busy.discard(idx)
+            else:
+                await asyncio.sleep(2)
+        else:
+            now = time.time()
+            free = [idx for idx in range(sm.count())
+                    if idx not in busy and _FLOOD_COOLDOWNS.get(idx, 0) <= now]
+            dispatched = False
+            while i < len(pending) and free:
+                idx = free.pop(0)
+                msg = pending[i]
+                t = asyncio.ensure_future(_parallel_one(
+                    sm.all()[idx], cfg, msg, idx, f"acc{idx + 1}/{sm.count()}",
+                    resolved))
+                running[t] = (idx, msg.id)
+                busy.add(idx)
+                log.info("parallel dispatch: post %s -> acc%d (%d in flight, %d queued)",
+                         msg.id, idx + 1, len(busy), len(pending) - i - 1)
+                i += 1
+                dispatched = True
+            if running:
+                done, _ = await asyncio.wait(
+                    list(running), return_when=asyncio.FIRST_COMPLETED)
+                for t in done:
+                    idx, mid = running.pop(t)
+                    busy.discard(idx)
+                    if not t.cancelled() and t.exception() is not None:
+                        log.warning("parallel worker crashed on post %s: %s",
+                                    mid, t.exception())
+            elif not dispatched:
+                if i >= len(pending):
+                    break
+                # nothing in flight, nothing dispatchable -> every account is
+                # flood-parked; sleep until the soonest one frees up
+                parks = [_FLOOD_COOLDOWNS.get(idx, 0) - now
+                         for idx in range(sm.count())]
+                parks = [p for p in parks if p > 0]
+                wait = max(5, min(parks)) if parks else 5
+                log.warning("parallel: every account flood-parked — sleeping %ds", wait)
+                await asyncio.sleep(min(wait, 60))
         # watermark: advance over every contiguously-resolved message
+        for mid, is_p, _ in collected:
+            if mid <= wm:
+                continue
+            if is_p and mid not in resolved:
+                break
+            wm = mid
+        await DB.set_progress(target, wm)
+    # v53: drain in-flight posts on ANY break (abort / pause-all / reset) so
+    # their results are resolved and the watermark covers them before the next
+    # pass — mirrors what the v39 gather() guaranteed per wave.
+    if running:
+        await asyncio.gather(*list(running), return_exceptions=True)
         for mid, is_p, _ in collected:
             if mid <= wm:
                 continue

@@ -1,4 +1,28 @@
 ================================================================================
+v53 - TRUE PARALLEL SCRAPING (free-slot dispatcher) + COMPACT /stats GLYPHS
+================================================================================
+Files changed: bot.py, botapi.py  (README.md, README_PATCH.txt updated).
+Deploy: replace both files in the repo root and redeploy Render.
+
+WHY: with 2 userbots the log still read "acc1 scraping, acc2 resting" — v39's
+dispatcher awaited a WHOLE wave (gather) before starting the next, so the wave
+moved at the slowest account's speed and a small backlog never used account 2.
+And /stats emoji cells rendered oversized/tall on several clients.
+
+WHAT CHANGED:
+  * bot.py _parallel_pass — FREE-SLOT dispatch. The moment any account finishes
+    a post it immediately takes the next pending one: acc1 does post 1 WHILE
+    acc2 does post 2, continuously, no wave barrier. Flood-parked accounts are
+    skipped and rejoin automatically when their cooldown ends; /pause lets
+    in-flight posts finish; any break (abort/reset/pause-target) DRAINS
+    in-flight posts so the progress watermark never skips one.
+  * Cover/video mixing — unchanged and still impossible: forwarder's per-DB
+    delivery lock serializes each post's complete bundle (cover FIRST, then
+    all media) even while several posts are processed in parallel.
+  * /stats — emoji replaced by compact text glyphs: A = admin, :) = member,
+    ×× = no access, -- = offline, · = n/a (legend in the footer).
+
+================================================================================
 v52.2 - /stats: TIGHTER ROWS + TAPPABLE CHANNEL LINKS
 ================================================================================
 Files changed: richboard.py, botapi.py  (README.md, README_PATCH.txt updated).

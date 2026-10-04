@@ -1,4 +1,14 @@
 ================================================================================
+v53 - TRUE PARALLEL SCRAPING (free-slot dispatcher) + COMPACT /stats GLYPHS
+================================================================================
+Files changed: bot.py, botapi.py. The parallel dispatcher no longer waits for a
+whole wave — the moment any userbot finishes a post it grabs the next pending
+one, so acc1 does post 1 while acc2 does post 2, continuously. Cover+media still
+cannot mix (forwarder's per-DB lock serializes each post's full bundle). /stats
+now uses compact text glyphs (A admin · :) member · ×× no access · -- offline)
+instead of oversized emoji cells.
+
+================================================================================
 v52.2 - /stats: TIGHTER ROWS + TAPPABLE CHANNEL LINKS
 ================================================================================
 Files changed: richboard.py, botapi.py. /stats rows are tightened (heading block
