@@ -1368,9 +1368,10 @@ def register(scrape_client, sm=None):
                     return "\u274C", "NOT a member"
 
         status = await ev.reply("⏳ Building /stats — checking every account against every channel…")
-        # ---- v52: compact RICH TABLE (Bot API InputRichBlockTable) ----
-        # one row per worker; cells hold only emojis keyed by target number, so
-        # the table stays narrow no matter how many targets exist.
+        # ---- v52.1: TRANSPOSED rich table — ROWS = channels, COLUMNS = workers.
+        # Every worker column holds exactly ONE emoji per row (never wraps), and
+        # the channel title sits inline on its row — no giant title legend.
+        # Kind column: T = target · DB = db channel · D2 = db2 mirror.
         role_cache = {}
 
         async def _cached_em(client, cid):
@@ -1381,66 +1382,101 @@ def register(scrape_client, sm=None):
                 role_cache[key] = (await _role(client, cid))[0]
             return role_cache[key]
 
-        legend = []
-        for j, t in enumerate(targets):
-            ttl = await _chat_title(scrape_client, t["id"]) or str(t["id"])
-            legend.append(f"{j + 1}·{ttl}")
+        def _clip(s, n=20):
+            s = s or "—"
+            return s if len(s) <= n else s[:n - 1] + "…"
 
-        tbl_rows = [[("#", None), ("Worker", None), ("Src", None),
-                     ("Targets", None), ("DB", None), ("DB2", None)]]
-        # control-bot row first (it posts the DB2 clean mirror)
-        me_b = await bot.get_me()
-        bot_name = f"@{me_b.username}" if getattr(me_b, "username", None) else "control bot"
-        bot_db = [await _cached_em(bot, t.get("db_id")) if t.get("db_id") else "·"
-                  for t in targets]
-        bot_db2 = [await _cached_em(bot, t.get("db2_id")) if t.get("db2_id") else "·"
-                   for t in targets]
-        tbl_rows.append([("🤖", None), (bot_name, None), ("bot", None),
-                         ("·" * len(targets) if targets else "—", None),
-                         (" ".join(bot_db) or "—", None),
-                         (" ".join(bot_db2) or "—", None)])
-        # ---- one compact row per userbot worker ----
-        for i, c in enumerate(mgr.all()):
-            src = getattr(c, "source", "env")
+        # ---- worker column headers + per-worker source tags + control bot col ----
+        clients = mgr.all()
+        labels, srcs = [], []
+        for c in clients:
             try:
-                if not c.is_connected():
-                    tbl_rows.append([(str(i + 1), None), ("⚪ offline", None), (src, None),
-                                     ("—", None), ("—", None), ("—", None)])
-                    continue
                 me = await c.get_me()
                 label = (f"@{me.username}" if getattr(me, "username", None) else
                          (((getattr(me, "first_name", "") or "") + " " +
                            (getattr(me, "last_name", "") or "")).strip() or str(me.id)))
-                t_cells = [await _cached_em(c, t["id"]) for t in targets]
-                d_cells = [await _cached_em(c, t.get("db_id")) if t.get("db_id") else "·"
-                           for t in targets]
-                d2_cells = [await _cached_em(c, t.get("db2_id")) if t.get("db2_id") else "·"
-                            for t in targets]
-                tbl_rows.append([(str(i + 1), None), (label, None), (src, None),
-                                 (" ".join(t_cells) or "—", None),
-                                 (" ".join(d_cells) or "—", None),
-                                 (" ".join(d2_cells) or "—", None)])
-            except Exception as e:
-                tbl_rows.append([(str(i + 1), None), (f"🔴 {type(e).__name__}", None), (src, None),
-                                 ("—", None), ("—", None), ("—", None)])
+            except Exception:
+                label = "?"
+            labels.append(label)
+            srcs.append(getattr(c, "source", "env"))
+        try:
+            me_b = await bot.get_me()
+            bot_label = (f"@{me_b.username}" if getattr(me_b, "username", None)
+                         else "control bot")
+        except Exception:
+            bot_label = "control bot"
 
-        legend_txt = " · ".join(legend)
-        if len(legend_txt) > 600:
-            legend_txt = legend_txt[:600].rsplit(" · ", 1)[0] + " …"
-        footer = ("✅ member · 👑 admin · ❌ no access — fix ❌ targets with "
-                  "/invite, ❌ DB/DB2 with /add\n" + (legend_txt or "no targets"))
+        header = [("Channel", None), ("Kind", None), (bot_label, None)]
+        for i, c in enumerate(clients):
+            header.append((f"{i + 1} {_clip(labels[i], 10)}", None))
+
+        def _row(title, kind, bot_emoji, per_worker):
+            return [(_clip(title), None), (kind, None), (bot_emoji or "·", None)] + \
+                   [(e, None) for e in per_worker]
+
+        tbl_rows = [header]
+        for t in targets:
+            t_title = await _chat_title(scrape_client, t["id"]) or str(t["id"])
+            d_title = (await _chat_title(scrape_client, t["db_id"])) if t.get("db_id") else None
+            d2_title = (await _chat_title(scrape_client, t["db2_id"])) if t.get("db2_id") else None
+            tbl_rows.append(_row(t_title, "T",
+                None,
+                [(await _cached_em(c, t["id"])) if c.is_connected() else "⚪"
+                 for c in clients]))
+            if t.get("db_id"):
+                tbl_rows.append(_row(d_title or str(t["db_id"]), "DB",
+                    await _cached_em(bot, t["db_id"]),
+                    [(await _cached_em(c, t["db_id"])) if c.is_connected() else "⚪"
+                     for c in clients]))
+            if t.get("db2_id"):
+                tbl_rows.append(_row(d2_title or str(t["db2_id"]), "D2",
+                    await _cached_em(bot, t["db2_id"]),
+                    [(await _cached_em(c, t["db2_id"])) if c.is_connected() else "⚪"
+                     for c in clients]))
+
+        wmap = " · ".join(f"{i + 1}={_clip(labels[i], 12)}({srcs[i]})"
+                          for i in range(len(clients)))
+        foot = (f"👑 admin · ✅ member · ❌ no access · · n/a — fix ❌: /invite "
+                f"(targets), /add (DB/DB2)\n🤖={_clip(bot_label, 12)}(bot)"
+                + (f" · {wmap}" if wmap else ""))
         try:
             await status.delete()
         except Exception:
             pass
-        sent = await richboard.send_table(ev.chat_id, "📊 WORKERS — live matrix",
-                                          tbl_rows, footer=footer)
-        if not sent:
+
+        # chunk the channel rows so a long target list never exceeds Telegram's
+        # rich-message size limit (repeats the header, page numbers in heading)
+        MAX_ROWS = 24
+        body = tbl_rows[1:]
+        pages = [tbl_rows[:1] + body[k:k + MAX_ROWS]
+                 for k in range(0, len(body), MAX_ROWS)] or [tbl_rows]
+        sent_any = False
+        for pi, page in enumerate(pages):
+            head = "📊 WORKERS — live matrix" if len(pages) == 1 else \
+                   f"📊 WORKERS — live matrix ({pi + 1}/{len(pages)})"
+            if await richboard.send_table(ev.chat_id, head, page, footer=foot):
+                sent_any = True
+            elif pi == 0:
+                break                       # rich unsupported -> plain fallback
+        if not sent_any:
             # plain-text fallback (chunked — stays sendable at any size)
-            lines = [f"📊 WORKERS — {mgr.count()} worker(s) × {len(targets)} target(s)"]
-            for row in tbl_rows[1:]:
-                lines.append(" | ".join((cell[0] or "—") for cell in row))
-            lines += ["", footer]
+            lines = [f"📊 WORKERS — {mgr.count()} worker(s) × {len(targets)} target(s)",
+                     "👑 admin · ✅ member · ❌ no access · · n/a", ""]
+            for t in targets:
+                t_title = await _chat_title(scrape_client, t["id"]) or str(t["id"])
+                lines.append(t_title)
+                lines.append("  T  " + " ".join(
+                    (await _cached_em(c, t["id"])) if c.is_connected() else "⚪"
+                    for c in clients))
+                if t.get("db_id"):
+                    lines.append("  DB " + " ".join(
+                        (await _cached_em(c, t["db_id"])) if c.is_connected() else "⚪"
+                        for c in clients))
+                if t.get("db2_id"):
+                    lines.append("  D2 " + " ".join(
+                        (await _cached_em(c, t["db2_id"])) if c.is_connected() else "⚪"
+                        for c in clients))
+            lines += ["", foot]
             txt = "\n".join(lines)
             for k in range(0, len(txt), 3800):
                 await ev.reply(txt[k:k + 3800])

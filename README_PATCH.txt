@@ -1,4 +1,28 @@
 ================================================================================
+v52.1 - /stats RICH TABLE REDESIGN (channels as ROWS, workers as COLUMNS)
+================================================================================
+Files changed: botapi.py  (README.md, README_PATCH.txt updated). Deploy:
+replace botapi.py in the repo root and redeploy Render. No data migration.
+
+WHY: v52's per-worker emoji matrix wrapped onto multiple lines once targets
+grew, the DB/DB2 columns got squeezed off the screen, and the 16-title footer
+legend was unreadable — you couldn't tell WHICH userbot was in WHICH channel
+or whether it was admin/member.
+
+WHAT CHANGED:
+  * /stats is now TRANSPOSED: each target emits up to 3 one-line rows —
+    T (target) / DB / D2 — with the channel title inline on the row.
+  * Each worker is a fixed-width COLUMN holding exactly ONE emoji per row
+    (👑 admin · ✅ member · ❌ no access · · n/a), so nothing ever wraps.
+  * The control bot gets its own column (the DB/D2 rows show ITS rights, since
+    it posts the clean mirror).
+  * Footer shrank to just the worker-number → name(source) map — channel titles
+    are inline now, not dumped in the footer.
+  * Long target lists are chunked into multiple compact tables (header repeated,
+    pages numbered) so Telegram's rich-message size limit can't kill it.
+  * Plain-text chunked fallback kept (channel title + T/DB/D2 rows).
+
+================================================================================
 v52 - LIVE WORKER SESSIONS (/addworker) + RICH-TABLE /stats (Render bot)
 ================================================================================
 Files changed: db.py, session_manager.py, bot.py, botapi.py, richboard.py

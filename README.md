@@ -1,4 +1,12 @@
 ================================================================================
+v52.1 - /stats RICH TABLE REDESIGN (channels as ROWS, workers as COLUMNS)
+================================================================================
+Files changed: botapi.py. /stats now transposes the matrix — each target emits
+T/DB/D2 one-line rows with the channel title inline; each worker is a column of
+single emojis (👑 admin · ✅ member · ❌ none · · n/a). Control bot gets its own
+column. Footer shrank to a worker-number map; long lists chunk into paged tables.
+
+================================================================================
 v52 - LIVE WORKER SESSIONS (/addworker) + RICH-TABLE /stats
 ================================================================================
 Files changed: db.py, session_manager.py, bot.py, botapi.py, richboard.py.
