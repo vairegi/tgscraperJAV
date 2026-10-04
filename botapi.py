@@ -1372,6 +1372,10 @@ def register(scrape_client, sm=None):
         # Every worker column holds exactly ONE emoji per row (never wraps), and
         # the channel title sits inline on its row — no giant title legend.
         # Kind column: T = target · DB = db channel · D2 = db2 mirror.
+        # v52.2: every channel title cell is a LINK — DB/DB2 get their cached
+        # invite link (minted by the userbot, it is admin there), private
+        # targets get their cached invite / t.me/c/… member link (any member
+        # userbot can view it).
         role_cache = {}
 
         async def _cached_em(client, cid):
@@ -1406,12 +1410,12 @@ def register(scrape_client, sm=None):
         except Exception:
             bot_label = "control bot"
 
-        header = [("Channel", None), ("Kind", None), (bot_label, None)]
+        header = [("📊 Channel", None), ("Kind", None), (bot_label, None)]
         for i, c in enumerate(clients):
             header.append((f"{i + 1} {_clip(labels[i], 10)}", None))
 
-        def _row(title, kind, bot_emoji, per_worker):
-            return [(_clip(title), None), (kind, None), (bot_emoji or "·", None)] + \
+        def _row(title, kind, bot_emoji, per_worker, url=None):
+            return [(_clip(title), url), (kind, None), (bot_emoji or "·", None)] + \
                    [(e, None) for e in per_worker]
 
         tbl_rows = [header]
@@ -1419,25 +1423,35 @@ def register(scrape_client, sm=None):
             t_title = await _chat_title(scrape_client, t["id"]) or str(t["id"])
             d_title = (await _chat_title(scrape_client, t["db_id"])) if t.get("db_id") else None
             d2_title = (await _chat_title(scrape_client, t["db2_id"])) if t.get("db2_id") else None
+            # v52.2: tappable channel links
+            last = await DB.get_last_post(t["id"])
+            t_link = await _target_link(scrape_client, t["id"], last)
+            d_link = (await _db_invite_link(scrape_client, t["db_id"])
+                      if t.get("db_id") else None)
+            d2_link = (await _db_invite_link(scrape_client, t["db2_id"])
+                       if t.get("db2_id") else None)
             tbl_rows.append(_row(t_title, "T",
                 None,
                 [(await _cached_em(c, t["id"])) if c.is_connected() else "⚪"
-                 for c in clients]))
+                 for c in clients], url=t_link))
             if t.get("db_id"):
                 tbl_rows.append(_row(d_title or str(t["db_id"]), "DB",
                     await _cached_em(bot, t["db_id"]),
                     [(await _cached_em(c, t["db_id"])) if c.is_connected() else "⚪"
-                     for c in clients]))
+                     for c in clients], url=d_link))
             if t.get("db2_id"):
                 tbl_rows.append(_row(d2_title or str(t["db2_id"]), "D2",
                     await _cached_em(bot, t["db2_id"]),
                     [(await _cached_em(c, t["db2_id"])) if c.is_connected() else "⚪"
-                     for c in clients]))
+                     for c in clients], url=d2_link))
 
         wmap = " · ".join(f"{i + 1}={_clip(labels[i], 12)}({srcs[i]})"
                           for i in range(len(clients)))
-        foot = (f"👑 admin · ✅ member · ❌ no access · · n/a — fix ❌: /invite "
-                f"(targets), /add (DB/DB2)\n🤖={_clip(bot_label, 12)}(bot)"
+        foot = (f"WORKERS — live matrix · {len(clients)} worker(s) × "
+                f"{len(targets)} target(s)\n"
+                f"👑 admin · ✅ member · ❌ no access · · n/a — fix ❌: /invite "
+                f"(targets), /add (DB/DB2) · tap a channel name to open it\n"
+                f"🤖={_clip(bot_label, 12)}(bot)"
                 + (f" · {wmap}" if wmap else ""))
         try:
             await status.delete()
@@ -1452,9 +1466,8 @@ def register(scrape_client, sm=None):
                  for k in range(0, len(body), MAX_ROWS)] or [tbl_rows]
         sent_any = False
         for pi, page in enumerate(pages):
-            head = "📊 WORKERS — live matrix" if len(pages) == 1 else \
-                   f"📊 WORKERS — live matrix ({pi + 1}/{len(pages)})"
-            if await richboard.send_table(ev.chat_id, head, page, footer=foot):
+            pg = "" if len(pages) == 1 else f" — page {pi + 1}/{len(pages)}"
+            if await richboard.send_table(ev.chat_id, footer=(foot + pg), rows=page):
                 sent_any = True
             elif pi == 0:
                 break                       # rich unsupported -> plain fallback

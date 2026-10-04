@@ -1,4 +1,12 @@
 ================================================================================
+v52.2 - /stats: TIGHTER ROWS + TAPPABLE CHANNEL LINKS
+================================================================================
+Files changed: richboard.py, botapi.py. /stats rows are tightened (heading block
+dropped, striping off, compact on — no blank padding per row; title + page number
+moved to the footer). Every channel title is now a tappable link: DB/DB2 use their
+cached invite links, private targets use their cached invite / t.me/c member link.
+
+================================================================================
 v52.1 - /stats RICH TABLE REDESIGN (channels as ROWS, workers as COLUMNS)
 ================================================================================
 Files changed: botapi.py. /stats now transposes the matrix — each target emits

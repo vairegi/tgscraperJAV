@@ -107,10 +107,12 @@ def _table_cells(rows):
 
 def build_table_payload(chat_id, heading, rows, footer=None):
     """sendRichMessage payload: one heading + one compact bordered table.
-    is_compact squeezes padding so a wide matrix (many target columns) still
-    fits on a phone screen."""
-    blocks = [{"type": "heading", "size": 3, "text": heading},
-              {"type": "table", "is_bordered": True, "is_striped": True,
+    is_compact squeezes cell padding (tighter row height) so a tall matrix
+    fits on a phone screen. v52.2: is_striped=False kills the per-row band
+    background + its extra spacing; we also drop the separate heading block so
+    there is zero blank gap above the first row — the footer carries the
+    legend/worker map instead."""
+    blocks = [{"type": "table", "is_bordered": True, "is_striped": False,
                "is_compact": True, "cells": _table_cells(rows)}]
     if footer:
         blocks.append({"type": "footer", "text": footer})
@@ -118,7 +120,7 @@ def build_table_payload(chat_id, heading, rows, footer=None):
             "rich_message": {"blocks": blocks}}
 
 
-async def send_table(chat_id, heading, rows, footer=None, retries=2):
+async def send_table(chat_id, heading=None, rows=None, footer=None, retries=2):
     """Send a standalone compact table message. Returns True on success,
     False so the caller can fall back to a plain-text listing."""
     if not BOT_TOKEN or not rows:

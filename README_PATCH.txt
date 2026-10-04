@@ -1,4 +1,24 @@
 ================================================================================
+v52.2 - /stats: TIGHTER ROWS + TAPPABLE CHANNEL LINKS
+================================================================================
+Files changed: richboard.py, botapi.py  (README.md, README_PATCH.txt updated).
+Deploy: replace both files in the repo root and redeploy Render.
+
+WHY: the table was too tall (blank padding above/below every row) and you
+couldn't jump into a channel from /stats.
+
+WHAT CHANGED:
+  * Tighter rows — the separate heading block is dropped (zero gap above row 1)
+    and the table is no longer striped, so each row renders at text height with
+    no band background / extra spacing. is_compact stays on. The "WORKERS — live
+    matrix" title + worker count moved into the footer (page numbers appended
+    there too).
+  * Tappable channels — every channel title cell is now a LINK: DB and DB2 use
+    their cached invite link (minted by the userbot, which is admin there), and
+    each private target uses its cached invite / t.me/c/<id>/<last_post> member
+    link — any member userbot (and you) can open it straight from the table.
+
+================================================================================
 v52.1 - /stats RICH TABLE REDESIGN (channels as ROWS, workers as COLUMNS)
 ================================================================================
 Files changed: botapi.py  (README.md, README_PATCH.txt updated). Deploy:
