@@ -381,6 +381,39 @@ async def get_last_post(target_id):
     doc = await db().progress.find_one({"_id": str(target_id)})
     return (doc or {}).get("last_post")
 
+# ---------------- v52: bot-added worker sessions ----------------
+# /addworker in the control bot stores extra Telethon StringSessions here
+# (config.extra_sessions) so a new scraping worker no longer needs a Render
+# env var + redeploy. Env sessions (STRING_SESSION, STRING_SESSION2, ...) still
+# load FIRST via config.py; these are appended after them at startup and
+# re-attached on every boot. A stored session that fails login is SKIPPED
+# (logged) — it never takes the whole process down.
+
+async def get_extra_sessions():
+    """List of {'session': <string>, 'added_at': <ts>, 'note': <str>}."""
+    doc = await db().config.find_one({"_id": "config"}) or {}
+    return [dict(x) for x in (doc.get("extra_sessions") or []) if isinstance(x, dict)]
+
+async def add_extra_session(sess, note=""):
+    """Append a StringSession (deduped by exact string). Returns (list, added?)."""
+    sessions = await get_extra_sessions()
+    if any(x.get("session") == sess for x in sessions):
+        return sessions, False
+    sessions.append({"session": sess, "added_at": time.time(), "note": note})
+    await set_config("extra_sessions", sessions)
+    return sessions, True
+
+async def remove_extra_session(n):
+    """Remove bot-added session #n (1-based, numbering shown by /addworker).
+    Returns (list, removed_entry) or None if n is out of range."""
+    sessions = await get_extra_sessions()
+    if not (1 <= n <= len(sessions)):
+        return None
+    removed = sessions.pop(n - 1)
+    await set_config("extra_sessions", sessions)
+    return sessions, removed
+
+
 # ---------------- stats + failures ----------------
 
 async def incr(field, n=1):

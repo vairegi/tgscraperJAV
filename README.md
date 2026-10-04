@@ -1,4 +1,15 @@
 ================================================================================
+v52 - LIVE WORKER SESSIONS (/addworker) + RICH-TABLE /stats
+================================================================================
+Files changed: db.py, session_manager.py, bot.py, botapi.py, richboard.py.
+
+/addworker <session string> adds a scraping worker LIVE — validated, stored in
+Mongo (config.extra_sessions), attached to the rotation with no redeploy. Bare
+/addworker lists all workers ([env] / [bot#k]); /removeworker <bot#> removes a
+bot-added one. /stats now renders a compact Bot API rich table (one row per
+worker, emoji membership matrix) with a chunked plain-text fallback.
+
+================================================================================
 v48 - CAPTION REWRITE + WORKING /avoid (Render bot)
 ================================================================================
 Files changed: botapi.py  (README.md, README_PATCH.txt updated). No other file

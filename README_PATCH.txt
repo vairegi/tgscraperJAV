@@ -1,4 +1,33 @@
 ================================================================================
+v52 - LIVE WORKER SESSIONS (/addworker) + RICH-TABLE /stats (Render bot)
+================================================================================
+Files changed: db.py, session_manager.py, bot.py, botapi.py, richboard.py
+(README.md, README_PATCH.txt updated). Deploy: replace those five files in the
+repo root and redeploy Render. No data migration — bot-added sessions live in
+the existing config doc (extra_sessions), created on first /addworker.
+
+WHY: adding a scraping account meant editing Render env vars + a redeploy; and
+/stats printed one giant plain-text list that errors out once targets grow.
+
+WHAT CHANGED:
+  * /addworker <session string> — validates the StringSession (logs it in),
+    stores it in Mongo (config.extra_sessions — survives redeploys) and
+    attaches it to the live rotation INSTANTLY, no restart. Duplicate strings
+    and duplicate accounts are refused; a bad string never touches the pool.
+    The checkdm DM watcher is registered on the new worker too.
+  * Bare /addworker — lists EVERY worker (profile, id) tagged [env] / [bot#k],
+    plus stored-vs-live counts.
+  * /removeworker <bot#> — detaches a bot-added worker from the live pool and
+    deletes it from Mongo. env workers are still managed on Render.
+  * bot.py startup re-attaches stored bot-added sessions after the env ones; a
+    stored session that fails login is SKIPPED loudly, never fatal.
+  * /stats — now a compact Bot API rich table (InputRichBlockTable via
+    richboard.py): one row per worker, emoji matrix (# | Worker | Src |
+    Targets | DB | DB2), control-bot row first, numbered target titles in the
+    footer. Falls back to a chunked plain-text grid if rich messages are
+    rejected. ✅ member · 👑 admin · ❌ no access.
+
+================================================================================
 v51 - CUSTOM LINK-BUTTON TEXT PER TARGET (Render bot)
 ================================================================================
 Files changed: scraper.py, flow.py, db.py, botapi.py. Deploy: replace all four

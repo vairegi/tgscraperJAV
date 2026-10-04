@@ -31,7 +31,9 @@ _CMDS = [
     # v40: regrouped for the tappable menu — related commands sit together
     ("help",     "Show all commands"),
     ("ping",     "Check the bot is alive"),
-    ("stats",    "Connected userbots (acc# + profile)"),
+    ("stats",    "v52: rich worker/membership table (compact Bot API table)"),
+    ("addworker",  "v52: add a scraping worker live: /addworker <session string> (bare = list all)"),
+    ("removeworker", "v52: remove a bot-added worker: /removeworker <bot#>"),
     ("checkram", "Show RAM usage (process + container, Render 512MB cap)"),
     ("target",   "Add target channel + its DB channel (wizard)"),
     ("targets",  "Live charge-sheet board (table + buttons) — plain list: /targets_text"),
@@ -440,8 +442,8 @@ def register(scrape_client, sm=None):
             ("🛠️ BULK JOBS", ["replace", "deletetext", "massdlt",
                 "massdlt_status", "massdlt_stop", "forward", "forward_status",
                 "forward_stop", "forward_resume"]),
-            ("👥 USERBOTS & ADMINS", ["stats", "invite", "leave", "add",
-                "checkdm", "addadmin", "removeadmin"]),
+            ("👥 USERBOTS & ADMINS", ["stats", "addworker", "removeworker",
+                "invite", "leave", "add", "checkdm", "addadmin", "removeadmin"]),
             ("ℹ️ MISC", ["help", "ping", "cancel"]),
         ]
         lines = ["📖 COMMANDS"]
@@ -1173,6 +1175,165 @@ def register(scrape_client, sm=None):
         await ev.reply(f"🗑 Removed label {n}: {removed}\n"
                        f"{len(buttons)} custom label(s) left (built-in '{BTN_SHORT_LINK}' is always active).")
 
+    # ---------- v52: /addworker /removeworker — runtime worker sessions ----------
+    @bot.on(events.NewMessage(pattern=r"^/addworker(?:\s+([\s\S]+))?$"))
+    async def addworker_cmd(ev):
+        """v52: /addworker <session string> adds a scraping worker LIVE — the
+        StringSession is validated (logged in), stored in Mongo
+        (config.extra_sessions — survives redeploys) and attached to the running
+        pool INSTANTLY, no restart. Bare /addworker lists every worker tagged
+        [env] / [bot#k] — env workers come from Render env vars, bot workers
+        were added here."""
+        if not await _admin(ev.sender_id):
+            return
+        mgr = _sm[0]
+        if mgr is None:
+            await ev.reply("Session manager unavailable.")
+            return
+        sess = (ev.pattern_match.group(1) or "").strip()
+
+        if not sess:
+            # ---- bare /addworker -> list every worker + its source ----
+            clients = mgr.all()
+            sources = mgr.sources()
+            extra = await DB.get_extra_sessions()
+            lines = [f"👷 WORKERS — {len(clients)} loaded "
+                     f"({sources.count('env')} env, {sources.count('bot')} bot-added)"]
+            bot_k = 0
+            for i, c in enumerate(clients):
+                src = sources[i] if i < len(sources) else "env"
+                if src == "bot":
+                    bot_k += 1
+                    tag_src = f"bot#{bot_k}"
+                else:
+                    tag_src = "env"
+                try:
+                    if not c.is_connected():
+                        lines.append(f"{i + 1}. ⚪ NOT CONNECTED [{tag_src}]")
+                        continue
+                    me = await c.get_me()
+                    tag = f"@{me.username}" if getattr(me, "username", None) else str(me.id)
+                    fname = ((getattr(me, "first_name", "") or "") + " " +
+                             (getattr(me, "last_name", "") or "")).strip()
+                    lines.append(f"{i + 1}. {fname or '?'} {tag} · id `{me.id}` [{tag_src}]")
+                except Exception as e:
+                    lines.append(f"{i + 1}. 🔴 error — {type(e).__name__} [{tag_src}]")
+            lines.append("")
+            lines.append("• env workers = Render env vars (STRING_SESSION, "
+                         "STRING_SESSION2, …) — change them on Render.")
+            lines.append("• /addworker <session string> — add a worker live "
+                         "(stored in Mongo, survives redeploys).")
+            lines.append(f"• /removeworker <bot#> — remove a bot-added worker "
+                         f"({len(extra)} stored, {bot_k} live now).")
+            await ev.reply("\n".join(lines))
+            return
+
+        # ---- /addworker <session string> ----
+        try:
+            from telethon.sessions import StringSession as _SS
+            _SS(sess)                      # fast malformed-string check
+        except Exception:
+            await ev.reply("⚠️ That doesn't look like a Telethon StringSession — "
+                           "generate one with gen_session.py and paste the whole string.")
+            return
+        if any(getattr(getattr(c, "session", None), "save", None) and c.session.save() == sess
+               for c in mgr.all()):
+            await ev.reply("ℹ️ That exact session is already a live worker.")
+            return
+        stored = await DB.get_extra_sessions()
+        if any(x.get("session") == sess for x in stored):
+            await ev.reply("ℹ️ That session is already stored (config.extra_sessions) — "
+                           "it loads on the next restart.")
+            return
+        status = await ev.reply("⏳ Logging the new worker in…")
+        try:
+            c = await mgr.add_session(sess, source="bot")
+        except Exception as e:
+            await status.edit(f"❌ Login failed — session NOT added.\n"
+                              f"`{type(e).__name__}: {str(e)[:200]}`\n"
+                              "Check the string is complete and the account isn't "
+                              "flood-limited, then retry.")
+            return
+        try:
+            me = await c.get_me()
+            my_id = me.id
+            tag = f"@{me.username}" if getattr(me, "username", None) else str(me.id)
+            fname = ((getattr(me, "first_name", "") or "") + " " +
+                     (getattr(me, "last_name", "") or "")).strip()
+        except Exception:
+            my_id, tag, fname = None, "?", "?"
+        # same account as an existing worker? -> undo, keep the original
+        for oc in mgr.all():
+            if oc is c:
+                continue
+            try:
+                ome = await oc.get_me()
+            except Exception:
+                continue
+            if my_id is not None and getattr(ome, "id", None) == my_id:
+                await mgr.remove_session(c)
+                await status.edit(f"ℹ️ That account is ALREADY a worker "
+                                  f"({tag}) — duplicate not added.")
+                return
+        await DB.add_extra_session(sess, note=f"{tag} {fname}".strip())
+        try:
+            import checkdm
+            checkdm.register(c)            # same DM watcher as the other workers
+        except Exception as e:
+            logging.getLogger("botapi").warning(
+                "checkdm register on new worker failed: %s", e)
+        n = mgr.count()
+        await status.edit(
+            f"✅ Worker {n} added — **{fname or '?'}** {tag} · id `{my_id}` [bot]\n"
+            f"Stored in Mongo — it re-attaches automatically after every redeploy.\n"
+            f"The account is LIVE now and joins the scraping rotation.\n"
+            f"Next: /invite {n} <channel> so it can read your targets — /stats to verify.")
+
+    @bot.on(events.NewMessage(pattern=r"^/removeworker(?:\s+(\d+))?$"))
+    async def removeworker_cmd(ev):
+        """v52: /removeworker <bot#> removes a BOT-ADDED worker (the [bot#k]
+        numbering shown by bare /addworker): detaches it from the live pool and
+        deletes it from Mongo so it never re-attaches. env workers can only be
+        removed on Render."""
+        if not await _admin(ev.sender_id):
+            return
+        mgr = _sm[0]
+        if mgr is None:
+            await ev.reply("Session manager unavailable.")
+            return
+        arg = ev.pattern_match.group(1)
+        if not arg:
+            await ev.reply("Usage: /removeworker <bot#> — the [bot#k] numbering "
+                           "shown by bare /addworker.")
+            return
+        r = await DB.remove_extra_session(int(arg))
+        if not r:
+            extra = await DB.get_extra_sessions()
+            await ev.reply(f"⚠️ No bot-added worker #{arg} — "
+                           f"{len(extra)} stored. Bare /addworker lists them.")
+            return
+        extra, removed = r
+        # detach the live client carrying the same session string, if present
+        live = None
+        for c in mgr.all():
+            try:
+                if (getattr(c, "source", "env") == "bot"
+                        and c.session.save() == removed.get("session")):
+                    live = c
+                    break
+            except Exception:
+                pass
+        detached = False
+        if live is not None:
+            detached = await mgr.remove_session(live)
+        await ev.reply(
+            f"🗑 Removed bot-added worker #{arg} ({removed.get('note') or 'no note'}).\n"
+            + ("Live worker detached — it leaves the rotation now."
+               if detached else
+               "No matching live worker found (or it's the last one) — "
+               "it simply won't load on the next boot.")
+            + f"\n{len(extra)} bot-added worker(s) left.")
+
     # ---------- v40: /stats, /invite, /leave, /avoid, /replaceword ----------
     @bot.on(events.NewMessage(pattern=r"^/stats$"))
     async def stats_cmd(ev):
@@ -1207,53 +1368,82 @@ def register(scrape_client, sm=None):
                     return "\u274C", "NOT a member"
 
         status = await ev.reply("⏳ Building /stats — checking every account against every channel…")
-        out = []
-        # ---- control bot: DB / DB2 rights (it posts the DB2 clean mirror) ----
+        # ---- v52: compact RICH TABLE (Bot API InputRichBlockTable) ----
+        # one row per worker; cells hold only emojis keyed by target number, so
+        # the table stays narrow no matter how many targets exist.
+        role_cache = {}
+
+        async def _cached_em(client, cid):
+            """_role emoji cached per (client, chat) — a DB/DB2 shared by
+            several targets is checked once, not once per target."""
+            key = (id(client), cid)
+            if key not in role_cache:
+                role_cache[key] = (await _role(client, cid))[0]
+            return role_cache[key]
+
+        legend = []
+        for j, t in enumerate(targets):
+            ttl = await _chat_title(scrape_client, t["id"]) or str(t["id"])
+            legend.append(f"{j + 1}·{ttl}")
+
+        tbl_rows = [[("#", None), ("Worker", None), ("Src", None),
+                     ("Targets", None), ("DB", None), ("DB2", None)]]
+        # control-bot row first (it posts the DB2 clean mirror)
         me_b = await bot.get_me()
-        out.append(f"🤖 CONTROL BOT @{me_b.username}")
-        seen = set()
-        for t in targets:
-            for lbl, cid in (("DB", t.get("db_id")), ("DB2", t.get("db2_id"))):
-                if not cid or cid in seen:
-                    continue
-                seen.add(cid)
-                em, role = await _role(bot, cid)
-                title = await _chat_title(scrape_client, cid) or str(cid)
-                out.append(f"  {em} {lbl} {title} — {role}")
-        # ---- each userbot: profile + target membership + DB/DB2 role ----
+        bot_name = f"@{me_b.username}" if getattr(me_b, "username", None) else "control bot"
+        bot_db = [await _cached_em(bot, t.get("db_id")) if t.get("db_id") else "·"
+                  for t in targets]
+        bot_db2 = [await _cached_em(bot, t.get("db2_id")) if t.get("db2_id") else "·"
+                   for t in targets]
+        tbl_rows.append([("🤖", None), (bot_name, None), ("bot", None),
+                         ("·" * len(targets) if targets else "—", None),
+                         (" ".join(bot_db) or "—", None),
+                         (" ".join(bot_db2) or "—", None)])
+        # ---- one compact row per userbot worker ----
         for i, c in enumerate(mgr.all()):
-            name = f"acc{i + 1}/{mgr.count()}"
+            src = getattr(c, "source", "env")
             try:
                 if not c.is_connected():
-                    out.append("")
-                    out.append(f"👤 {name}: ⚪ NOT CONNECTED")
+                    tbl_rows.append([(str(i + 1), None), ("⚪ offline", None), (src, None),
+                                     ("—", None), ("—", None), ("—", None)])
                     continue
                 me = await c.get_me()
-                uname = f"@{me.username}" if getattr(me, "username", None) else "(no username)"
-                fname = ((getattr(me, "first_name", "") or "") + " " + (getattr(me, "last_name", "") or "")).strip()
-                out.append("")
-                out.append(f"👤 {name}: {fname or '?'} {uname} · id `{me.id}`")
+                label = (f"@{me.username}" if getattr(me, "username", None) else
+                         (((getattr(me, "first_name", "") or "") + " " +
+                           (getattr(me, "last_name", "") or "")).strip() or str(me.id)))
+                t_cells = [await _cached_em(c, t["id"]) for t in targets]
+                d_cells = [await _cached_em(c, t.get("db_id")) if t.get("db_id") else "·"
+                           for t in targets]
+                d2_cells = [await _cached_em(c, t.get("db2_id")) if t.get("db2_id") else "·"
+                            for t in targets]
+                tbl_rows.append([(str(i + 1), None), (label, None), (src, None),
+                                 (" ".join(t_cells) or "—", None),
+                                 (" ".join(d_cells) or "—", None),
+                                 (" ".join(d2_cells) or "—", None)])
             except Exception as e:
-                out.append("")
-                out.append(f"👤 {name}: 🔴 error — {type(e).__name__}")
-                continue
-            for j, t in enumerate(targets):
-                em, role = await _role(c, t["id"])
-                ttl = await _chat_title(c, t["id"]) or str(t["id"])
-                out.append(f"  {em} target {j + 1} · {ttl} — {role}")
-                for lbl, cid in (("DB", t.get("db_id")), ("DB2", t.get("db2_id"))):
-                    if not cid:
-                        continue
-                    em2, role2 = await _role(c, cid)
-                    ttl2 = await _chat_title(c, cid) or str(cid)
-                    out.append(f"      {em2} {lbl} {ttl2} — {role2}")
-        out.append("")
-        out.append("❌ on a target = join it with /invite · not admin in a DB = add rights there.")
-        text = "\n".join(out)
+                tbl_rows.append([(str(i + 1), None), (f"🔴 {type(e).__name__}", None), (src, None),
+                                 ("—", None), ("—", None), ("—", None)])
+
+        legend_txt = " · ".join(legend)
+        if len(legend_txt) > 600:
+            legend_txt = legend_txt[:600].rsplit(" · ", 1)[0] + " …"
+        footer = ("✅ member · 👑 admin · ❌ no access — fix ❌ targets with "
+                  "/invite, ❌ DB/DB2 with /add\n" + (legend_txt or "no targets"))
         try:
-            await status.edit(text)
+            await status.delete()
         except Exception:
-            await ev.reply(text)
+            pass
+        sent = await richboard.send_table(ev.chat_id, "📊 WORKERS — live matrix",
+                                          tbl_rows, footer=footer)
+        if not sent:
+            # plain-text fallback (chunked — stays sendable at any size)
+            lines = [f"📊 WORKERS — {mgr.count()} worker(s) × {len(targets)} target(s)"]
+            for row in tbl_rows[1:]:
+                lines.append(" | ".join((cell[0] or "—") for cell in row))
+            lines += ["", footer]
+            txt = "\n".join(lines)
+            for k in range(0, len(txt), 3800):
+                await ev.reply(txt[k:k + 3800])
 
     def _parse_invite(ev):
         """'/invite 2 <link>' -> (2, link); '/invite <link>' -> (None, link).

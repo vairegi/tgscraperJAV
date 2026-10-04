@@ -490,10 +490,27 @@ async def main():
     client = await guarded(lambda: sm.start(), "userbot login")
     me = await client.get_me()
     state.scrape_client = client  # v39: userbot fallback for admin alert DMs
-    log.info("logged in as %s (%s) — %d account(s) loaded (%s)",
+    log.info("logged in as %s (%s) — %d env account(s) loaded (%s)",
              me.first_name, me.id, sm.count(),
              "PARALLEL multi-userbot scraping" if sm.count() > 1
              else "single account")
+    # v52: re-attach sessions previously added via /addworker (Mongo-backed).
+    # A stored session that fails to log in is SKIPPED loudly — it never
+    # blocks startup or the env sessions.
+    try:
+        extra = await DB.get_extra_sessions()
+    except Exception as e:
+        log.warning("v52: could not read extra sessions from Mongo: %s", e)
+        extra = []
+    for x in extra:
+        try:
+            xc = await sm.add_session(x["session"], source="bot")
+            xme = await xc.get_me()
+            log.info("v52: re-attached bot-added worker @%s (%s)",
+                     getattr(xme, "username", "?"), xme.id)
+        except Exception as e:
+            log.warning("v52: a bot-added session failed to log in and was "
+                        "SKIPPED: %s", e)
     # NOTE: userbot command handlers are DISABLED (bot-only replies).
     # commands.register(client)  <- uncomment to re-enable Saved-Messages commands
     # v34: /checkdm pipeline — every userbot session watches @richmining's DM

@@ -92,6 +92,53 @@ def _cell(title, url=None, header=False, align="left"):
 
 
 # ---------------------------------------------------------------------------
+# v52: GENERIC compact table — reused by /stats (worker/membership matrix).
+# cells = list of rows; each row = list of (title, url_or_None) tuples.
+# Row 0 is rendered as the header. Kept separate from the targets board below
+# so /stats gets a compact table without the board's pause/resume keyboard.
+# ---------------------------------------------------------------------------
+def _table_cells(rows):
+    """rows: [[(title, url), ...], ...] -> Bot API table cell matrix (row 0 header)."""
+    out = []
+    for ri, row in enumerate(rows):
+        out.append([_cell(t, u, header=(ri == 0)) for (t, u) in row])
+    return out
+
+
+def build_table_payload(chat_id, heading, rows, footer=None):
+    """sendRichMessage payload: one heading + one compact bordered table.
+    is_compact squeezes padding so a wide matrix (many target columns) still
+    fits on a phone screen."""
+    blocks = [{"type": "heading", "size": 3, "text": heading},
+              {"type": "table", "is_bordered": True, "is_striped": True,
+               "is_compact": True, "cells": _table_cells(rows)}]
+    if footer:
+        blocks.append({"type": "footer", "text": footer})
+    return {"chat_id": chat_id,
+            "rich_message": {"blocks": blocks}}
+
+
+async def send_table(chat_id, heading, rows, footer=None, retries=2):
+    """Send a standalone compact table message. Returns True on success,
+    False so the caller can fall back to a plain-text listing."""
+    if not BOT_TOKEN or not rows:
+        return False
+    payload = build_table_payload(chat_id, heading, rows, footer)
+    for attempt in range(retries + 1):
+        ok, res = await api_call("sendRichMessage", payload)
+        if ok:
+            return True
+        desc = str(res).lower()
+        if any(k in desc for k in ("rich", "unsupported", "can't parse",
+                                   "chat not found", "forbidden", "not found",
+                                   "bad request")):
+            log.warning("rich table unsupported (%s) — markdown fallback", desc)
+            return False
+        await asyncio.sleep(1.5 * (attempt + 1))
+    return False
+
+
+# ---------------------------------------------------------------------------
 # board construction
 # ---------------------------------------------------------------------------
 def _grid_keyboard(rows):
