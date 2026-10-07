@@ -1363,15 +1363,25 @@ def register(scrape_client, sm=None):
             return
         try:
             import telethon
-            from telethon.tl import all_tlobjects as _tl
-            ver = f"telethon {telethon.__version__} · TL layer {_tl.LAYER}"
-        except Exception:
-            ver = "telethon version unknown"
+            from telethon.tl.alltlobjects import LAYER as _TL_LAYER
+            ver = f"telethon {telethon.__version__} · TL layer {_TL_LAYER}"
+        except Exception as _e:
+            try:
+                import telethon
+                ver = f"telethon {telethon.__version__} · TL layer unknown ({_e})"
+            except Exception:
+                ver = "telethon version unknown"
         target_msg = next((m for m in (msgs or []) if m is not None), None)
         if target_msg is None:
             await ev.reply(f"{ver}\n\nNo message found in {endpoint}.")
             return
-        dump = repr(target_msg)
+        # v57.1: repr() returns a bare object on patched.Message — stringify()
+        # dumps EVERY decoded field (entity/button constructor names, text,
+        # reply_markup) so we see what Telethon actually parsed.
+        try:
+            dump = target_msg.stringify()
+        except Exception:
+            dump = repr(target_msg)
         text = f"{ver}\nendpoint={endpoint}\nmsg id={target_msg.id}\n\n{dump}"
         # send in chunks so a long repr never hits the 4096-char cap
         for k in range(0, min(len(text), 8000), 4000):

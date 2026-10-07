@@ -1,4 +1,14 @@
 ================================================================================
+v57.1 - DIAGNOSTIC FIX (stringify dump + correct LAYER path) + RE-AUTH ACTION
+================================================================================
+Files changed: bot.py, botapi.py. Telethon 1.45.0 = TL layer 229, but Tobi's
+reply carries layer-230+ caption copy_text buttons -> the whole message decodes
+empty. THE FIX IS RE-AUTH: regenerate the StringSession with gen_session.py and
+update the env var so a fresh auth negotiates layer 230+. This build also fixes
+the diagnostic: startup logs the real layer and /probebypass dumps fields via
+.stringify().
+
+================================================================================
 v57 - BYPASS DIAGNOSTIC (startup version log + /probebypass raw dump)
 ================================================================================
 Files changed: bot.py, botapi.py, requirements.txt. Diagnostic-only build — no

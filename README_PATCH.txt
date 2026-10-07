@@ -1,4 +1,20 @@
 ================================================================================
+v57.1 - DIAGNOSTIC FIX (stringify dump + correct LAYER path) + RE-AUTH ACTION
+================================================================================
+Files changed: bot.py, botapi.py  (README.md, README_PATCH.txt updated).
+Deploy: replace both files in the repo root and redeploy Render. Diagnostic-only.
+
+ROOT CAUSE (confirmed): Telethon 1.45.0 runs TL layer 229; Tobi Bypass Bot's
+reply carries layer-230+ caption copy_text buttons, so Telegram drops the ENTIRE
+message -> text='' entities=[] buttons=[]. THE REAL FIX IS RE-AUTH: regenerate
+the StringSession with gen_session.py and update the env var so a fresh auth
+negotiates layer 230+.
+
+WHAT CHANGED: startup logs the real layer (correct telethon.tl.alltlobjects
+path instead of 'unknown'); /probebypass now dumps every decoded field via
+.stringify() instead of a useless repr().
+
+================================================================================
 v57 - BYPASS DIAGNOSTIC (startup version log + /probebypass raw dump)
 ================================================================================
 Files changed: bot.py, botapi.py, requirements.txt  (README.md, README_PATCH.txt

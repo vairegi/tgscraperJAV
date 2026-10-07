@@ -540,11 +540,16 @@ async def main():
     # TL-layer / decode issue; this line proves what Render is really running.
     try:
         import telethon
-        from telethon.tl import all_tlobjects as _tl
+        from telethon.tl.alltlobjects import LAYER as _TL_LAYER   # v57.1: correct path (1.45+)
         log.info("TELETHON VERSION %s · TL layer %s",
-                 telethon.__version__, _tl.LAYER)
+                 telethon.__version__, _TL_LAYER)
     except Exception as _e:
-        log.info("TELETHON VERSION unknown (%s)", _e)
+        try:
+            import telethon
+            log.info("TELETHON VERSION %s · TL layer unknown (%s)",
+                     telethon.__version__, _e)
+        except Exception:
+            log.info("TELETHON VERSION unknown (%s)", _e)
     log.info("logged in as %s (%s) — %d env account(s) loaded (%s)",
              me.first_name, me.id, sm.count(),
              "PARALLEL multi-userbot scraping" if sm.count() > 1
