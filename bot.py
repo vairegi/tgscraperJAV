@@ -535,6 +535,16 @@ async def main():
     client = await guarded(lambda: sm.start(), "userbot login")
     me = await client.get_me()
     state.scrape_client = client  # v39: userbot fallback for admin alert DMs
+    # v57: log the EXACT Telethon version + TL layer at startup — the bypass
+    # reply decodes empty (text='' entities=[] buttons=[]), which points at a
+    # TL-layer / decode issue; this line proves what Render is really running.
+    try:
+        import telethon
+        from telethon.tl import all_tlobjects as _tl
+        log.info("TELETHON VERSION %s · TL layer %s",
+                 telethon.__version__, _tl.LAYER)
+    except Exception as _e:
+        log.info("TELETHON VERSION unknown (%s)", _e)
     log.info("logged in as %s (%s) — %d env account(s) loaded (%s)",
              me.first_name, me.id, sm.count(),
              "PARALLEL multi-userbot scraping" if sm.count() > 1

@@ -1,4 +1,30 @@
 ================================================================================
+v57 - BYPASS DIAGNOSTIC (startup version log + /probebypass raw dump)
+================================================================================
+Files changed: bot.py, botapi.py, requirements.txt  (README.md, README_PATCH.txt
+updated). Deploy: replace all three in the repo root and redeploy Render. No
+data migration. This is a DIAGNOSTIC build — it changes no scraping behavior.
+
+WHY: the build log proves telethon 1.45.0 IS freshly installed, yet the bypass
+reply still decodes empty (text='' entities=[] buttons=[]). That rules out an
+old-version cache and points at a TL-layer/session decode issue on the userbot
+account. We need REAL data on what Telethon decodes, not more guessing.
+
+WHAT CHANGED:
+  * bot.py — logs the EXACT running Telethon version + TL layer at startup
+    ('TELETHON VERSION x.y · TL layer N'), so the Render log proves what is
+    actually loaded.
+  * botapi.py — /probebypass command: fetches the bypass bot's newest message
+    and replies with its raw repr() (every field Telethon decoded: entity/
+    button constructor names, text, reply_markup) + the version/layer line.
+  * requirements.txt — telethon floor raised to >=1.45.0 (matches what Render
+    installed) so it can never silently fall back to an older wheel.
+
+AFTER DEPLOY: run /probebypass once and paste the dump. The constructor names
+in it tell exactly how to extract the bypassed link — the next fix is written
+against that real data.
+
+================================================================================
 v56 - BYPASS: READ 'COPY LINK' CAPTION BUTTONS (copy_text) + TIMEOUT DEBUG LOG
 ================================================================================
 Files changed: flow.py, requirements.txt  (README.md, README_PATCH.txt

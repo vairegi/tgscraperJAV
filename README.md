@@ -1,4 +1,14 @@
 ================================================================================
+v57 - BYPASS DIAGNOSTIC (startup version log + /probebypass raw dump)
+================================================================================
+Files changed: bot.py, botapi.py, requirements.txt. Diagnostic-only build — no
+scraping behavior changes. Startup now logs the exact Telethon version + TL
+layer; /probebypass dumps the raw repr() of the bypass bot's newest reply so we
+see the real entity/button constructors Telethon decodes (the reply currently
+comes back empty). telethon floor raised to >=1.45.0. Run /probebypass after
+deploy and share the dump.
+
+================================================================================
 v56 - BYPASS: READ 'COPY LINK' CAPTION BUTTONS (copy_text) + TIMEOUT DEBUG LOG
 ================================================================================
 Files changed: flow.py, requirements.txt. Tobi Bypass Bot's reply hides the

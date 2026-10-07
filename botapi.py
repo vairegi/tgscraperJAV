@@ -66,6 +66,7 @@ _CMDS = [
     ("skip",     "Skip current post"),
     ("stop",     "Stop the scraper"),
     ("cancel",   "Cancel an active wizard prompt"),
+    ("probebypass", "v57 diagnostic: raw dump of the bypass bot's last reply"),
     ("replace",  "Edit posts: /replace <ch> \"old\" \"new\" (userbot) — 2 args = DB2 (bot)"),
     ("deletetext","Remove text from channel posts: /deletetext <ch> \"text\""),
     ("massdlt",  "Delete a message range: /massdlt <chat> <start_link> <end_link>"),
@@ -444,7 +445,7 @@ def register(scrape_client, sm=None):
                 "forward_stop", "forward_resume"]),
             ("👥 USERBOTS & ADMINS", ["stats", "addworker", "removeworker",
                 "invite", "leave", "add", "checkdm", "addadmin", "removeadmin"]),
-            ("ℹ️ MISC", ["help", "ping", "cancel"]),
+            ("ℹ️ MISC", ["help", "ping", "cancel", "probebypass"]),
         ]
         lines = ["📖 COMMANDS"]
         shown = set()
@@ -1333,6 +1334,48 @@ def register(scrape_client, sm=None):
                "No matching live worker found (or it's the last one) — "
                "it simply won't load on the next boot.")
             + f"\n{len(extra)} bot-added worker(s) left.")
+
+    # ---------- v57: /probebypass — raw dump of the bypass bot's last reply ----------
+    @bot.on(events.NewMessage(pattern=r"^/probebypass$"))
+    async def probebypass_cmd(ev):
+        """v57 diagnostic: fetch the bypass bot's newest message and reply with
+        its RAW repr() (every field Telethon actually decoded — entity/button
+        constructor names, text, reply_markup) plus the running Telethon
+        version + TL layer. This pinpoints WHY a bypass reply decodes as
+        text='' entities=[] buttons=[] instead of guessing."""
+        if not await _admin(ev.sender_id):
+            return
+        mgr = _sm[0]
+        if mgr is None or mgr.count() == 0:
+            await ev.reply("No userbot loaded.")
+            return
+        cfg = await DB.get_config()
+        pool = await DB.get_bypass_pool()
+        endpoint = cfg.get("bypass_id") or (pool[0] if pool else None)
+        if endpoint is None:
+            await ev.reply("No bypass endpoint configured.")
+            return
+        c = mgr.all()[0]
+        try:
+            msgs = await c.get_messages(endpoint, limit=2)
+        except Exception as e:
+            await ev.reply(f"⚠️ can't read {endpoint}: {type(e).__name__}: {e}")
+            return
+        try:
+            import telethon
+            from telethon.tl import all_tlobjects as _tl
+            ver = f"telethon {telethon.__version__} · TL layer {_tl.LAYER}"
+        except Exception:
+            ver = "telethon version unknown"
+        target_msg = next((m for m in (msgs or []) if m is not None), None)
+        if target_msg is None:
+            await ev.reply(f"{ver}\n\nNo message found in {endpoint}.")
+            return
+        dump = repr(target_msg)
+        text = f"{ver}\nendpoint={endpoint}\nmsg id={target_msg.id}\n\n{dump}"
+        # send in chunks so a long repr never hits the 4096-char cap
+        for k in range(0, min(len(text), 8000), 4000):
+            await ev.reply(f"```{text[k:k + 4000]}```", parse_mode="md")
 
     # ---------- v40: /stats, /invite, /leave, /avoid, /replaceword ----------
     @bot.on(events.NewMessage(pattern=r"^/stats$"))
