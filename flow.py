@@ -77,6 +77,26 @@ def _msg_urls(m):
             u = getattr(b, "url", None)
             if u:
                 urls.append(u)
+            # v56: caption "COPY LINK" buttons (Bot API copy_text -> MTProto
+            # keyboardButtonCopy) CARRY the bypassed link in .text — they have
+            # no .url, so entity/button-url harvesting never saw them. This is
+            # how Tobi Bypass Bot's reply hides the deep link.
+            if type(b).__name__ == "KeyboardButtonCopy":
+                ct = getattr(b, "text", None)
+                if ct:
+                    urls.append(ct)
+    # v56 fallback: read the raw reply_markup too, in case a brand-new button
+    # type makes Telethon's .buttons helper come back empty.
+    rm = getattr(m, "reply_markup", None)
+    for row in (getattr(rm, "rows", None) or []):
+        for b in (getattr(row, "buttons", None) or []):
+            u = getattr(b, "url", None)
+            if u:
+                urls.append(u)
+            if type(b).__name__ == "KeyboardButtonCopy":
+                ct = getattr(b, "text", None)
+                if ct:
+                    urls.append(ct)
     return urls
 
 
@@ -186,6 +206,20 @@ async def _bypass_once(client, endpoint, short_link, link_bot, msg, worker_name=
         except Abort:
             raise
         except Exception as e:
+            # v56: log WHAT the endpoint actually showed us — message ids,
+            # first 120 chars, entity/button TYPE NAMES — so the next failure
+            # log says exactly which message shape Telethon saw.
+            try:
+                seen = await client.get_messages(endpoint, limit=6, min_id=sent.id)
+                for sm_ in [x for x in (seen or []) if x]:
+                    log.warning(
+                        "bypass-debug %s msg %s: text=%r entities=%s buttons=%s",
+                        endpoint, sm_.id, (sm_.text or "")[:120],
+                        [type(x).__name__ for x in (sm_.entities or [])],
+                        [type(b).__name__ for row in (sm_.buttons or [])
+                         for b in (row or [])])
+            except Exception:
+                pass
             raise BypassFailed(f"{endpoint}: {e}")
 
     if is_bot:

@@ -1,4 +1,28 @@
 ================================================================================
+v56 - BYPASS: READ 'COPY LINK' CAPTION BUTTONS (copy_text) + TIMEOUT DEBUG LOG
+================================================================================
+Files changed: flow.py, requirements.txt  (README.md, README_PATCH.txt
+updated). Deploy: replace both files in the repo root and redeploy Render.
+
+WHY: v54 (entities/buttons) + v55 (race/catch-up) were in and it STILL timed
+out. The screenshot showed why: Tobi Bypass Bot's reply hides the bypassed
+deep link in a COLLAPSED quote block plus a caption 'COPY LINK' button built
+with the new Bot API copy_text field. A copy_text button has NO .url — the
+link lives in the button's copy payload — so text/entity/url-button
+harvesting all came up empty.
+
+WHAT CHANGED:
+  * flow.py _msg_urls — also harvests keyboardButtonCopy .text (the COPY LINK
+    payload — the bypassed t.me deep link itself), with a raw reply_markup
+    fallback in case a brand-new button type empties Telethon's .buttons.
+  * flow.py _bypass_once — on timeout it now logs what the endpoint ACTUALLY
+    showed: message ids, first 120 chars of text, and entity/button TYPE
+    names, so any future failure log pinpoints the shape instead of a bare
+    'no matching reply'.
+  * requirements.txt — telethon pinned >= 1.39 so Render always builds with a
+    version that knows the new caption-button TL types.
+
+================================================================================
 v55 - BYPASS REPLY RACE FIX (fast bots scrolled past the poll window)
 ================================================================================
 Files changed: flow.py, config.py  (README.md, README_PATCH.txt updated).

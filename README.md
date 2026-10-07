@@ -1,4 +1,14 @@
 ================================================================================
+v56 - BYPASS: READ 'COPY LINK' CAPTION BUTTONS (copy_text) + TIMEOUT DEBUG LOG
+================================================================================
+Files changed: flow.py, requirements.txt. Tobi Bypass Bot's reply hides the
+bypassed deep link in a collapsed quote + a caption COPY LINK button (Bot API
+copy_text -> MTProto keyboardButtonCopy) — no .url, so nothing harvested it.
+_msg_urls now reads the copy-button payload (plus a raw reply_markup fallback),
+and a bypass timeout logs the exact entity/button type names Telethon saw.
+telethon pinned >= 1.39 for the new caption-button TL types.
+
+================================================================================
 v55 - BYPASS REPLY RACE FIX (fast bots scrolled past the poll window)
 ================================================================================
 Files changed: flow.py, config.py. Tobi Bypass Bot answers in ~1s, but the
