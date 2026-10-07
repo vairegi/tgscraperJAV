@@ -57,6 +57,29 @@ async def _last_id(client, entity):
     msgs = await client.get_messages(entity, limit=1)
     return msgs[0].id if msgs else 0
 
+
+def _msg_urls(m):
+    """v54: every URL a message CARRIES — not just its literal text. Bypass
+    bots (e.g. Tobi Bypass Bot) hide the bypassed t.me deep link inside a
+    COLLAPSIBLE quote block / inline hyperlink entity and/or on an 'OPEN
+    LINK' URL button; the plain .text then contains no 't.me/' literal at
+    all, so the old text-only detection timed out after 60s even though the
+    reply was right there. Duck-typed: entities/buttons that carry a URL
+    expose it as .url; plain auto-linkified URLs stay in .text and are
+    covered by the text harvester."""
+    urls = []
+    for e in (getattr(m, "entities", None) or []):
+        u = getattr(e, "url", None)
+        if u:
+            urls.append(u)
+    for row in (getattr(m, "buttons", None) or []):
+        for b in (row or []):
+            u = getattr(b, "url", None)
+            if u:
+                urls.append(u)
+    return urls
+
+
 async def _wait_new(client, entity, after_id, timeout, need_button=None, need_text=None):
     """Poll a chat for the oldest message with id > after_id that matches filters."""
     deadline = time.time() + timeout
@@ -67,8 +90,9 @@ async def _wait_new(client, entity, after_id, timeout, need_button=None, need_te
         for m in sorted([m for m in msgs if m and m.id > after_id], key=lambda x: x.id):
             if need_button and not find_button(m, need_button):
                 continue
-            if need_text and norm(need_text) not in norm(m.text):
-                continue
+            if need_text and norm(need_text) not in norm(m.text) \
+                    and norm(need_text) not in norm(" ".join(_msg_urls(m))):
+                continue   # v54: also match links hidden in entities/buttons
             return m
         await asyncio.sleep(POLL_INTERVAL)
     raise TimeoutError(f"no matching reply in chat {entity} within {timeout}s")
@@ -146,8 +170,13 @@ async def _bypass_once(client, endpoint, short_link, link_bot, msg, worker_name=
         # formatted reply, e.g. '◈ Bypassed Link ➤ https://t.me/<bot>?start=...'
         # — harvest every t.me URL; prefer the ?start= deep link (that IS the
         # bypassed one); '@credit' usernames are not t.me URLs so ignored.
+        # v54: harvest the t.me deep link from text AND entities AND buttons
+        # (collapsible-quote / inline-hyperlink replies, Tobi-Bypass-Bot style).
+        # Raw (un-normalized) strings, so the case-sensitive ?start= payload
+        # keeps its exact mixed case.
         text = bm.text or bm.message or ""
-        urls = _TG_URL_RE.findall(text)
+        urls = _TG_URL_RE.findall(text) + _TG_URL_RE.findall(" ".join(_msg_urls(bm)))
+        urls = list(dict.fromkeys(urls))   # dedupe, keep order
         start_urls = [u for u in urls if "?start=" in u]
         bypassed_url = (start_urls or urls)[-1] if urls else None
         if not bypassed_url:

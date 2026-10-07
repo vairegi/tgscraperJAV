@@ -47,7 +47,12 @@ async def record_possible_duplicate(target_id, msg_id, score, match_fp, match_mi
         )
         async with _DM_LOCK:
             for uid in (_ADMIN_IDS or ()):
-                try: await _send_admin_dm(uid, text)
+                try:
+                    # v54: fall back to the log stub when botapi's real DM
+                    # sender isn't wired — the bare name was a NameError that
+                    # silently ate every POSSIBLE DUPLICATE alert.
+                    fn = globals().get("_send_admin_dm") or _send_admin_dm_stub
+                    await fn(uid, text)
                 except Exception as e: log.warning("dedup: alert DM failed (%s)", e)
         log.info("POS DUPE: msg %s near match %s in DB2 (%.1f%%)", msg_id, match_mid, score)
     except Exception as e:

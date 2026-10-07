@@ -1,4 +1,30 @@
 ================================================================================
+v54 - BYPASS LINK HARVEST FROM COLLAPSIBLE QUOTES / BUTTONS + dedup DM fix
+================================================================================
+Files changed: flow.py, dedup.py  (README.md, README_PATCH.txt updated).
+Deploy: replace both files in the repo root and redeploy Render.
+
+WHY: bypass bots like Tobi Bypass Bot reply with the bypassed link inside a
+COLLAPSIBLE quote block (inline hyperlink entity) plus an 'OPEN LINK' URL
+button — the plain message text contains NO literal 't.me/'. The old harvester
+searched text only, so _wait_new(need_text="t.me/") never matched the reply
+and every post failed with 'no matching reply in chat ... within 60s' on BOTH
+attempts. It was NOT the fancy font (norm() already folds Unicode fonts).
+
+WHAT CHANGED:
+  * flow.py _msg_urls() — new duck-typed helper that collects every URL a
+    message carries: MessageEntityTextUrl (collapsible quote / inline links)
+    and URL buttons (OPEN LINK).
+  * _wait_new need_text matcher now ALSO checks entity/button URLs, so the
+    reply is detected the moment it arrives instead of timing out.
+  * _bypass_once harvests t.me deep links from text + entities + buttons
+    (deduped, order kept; raw strings so the case-sensitive ?start= payload
+    is preserved). Preference is still the ?start= deep link.
+  * dedup.py: 'name _send_admin_dm is not defined' NameError (seen in the
+    Render log) fixed — falls back to the log stub when botapi's DM sender
+    isn't wired, instead of silently eating POSSIBLE DUPLICATE alerts.
+
+================================================================================
 v53 - TRUE PARALLEL SCRAPING (free-slot dispatcher) + COMPACT /stats GLYPHS
 ================================================================================
 Files changed: bot.py, botapi.py  (README.md, README_PATCH.txt updated).

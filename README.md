@@ -1,4 +1,13 @@
 ================================================================================
+v54 - BYPASS LINK HARVEST FROM COLLAPSIBLE QUOTES / BUTTONS + dedup DM fix
+================================================================================
+Files changed: flow.py, dedup.py. Bypass replies that hide the t.me deep link
+in a collapsible quote / inline hyperlink entity or an OPEN LINK button (Tobi
+Bypass Bot style) are now detected and parsed — previously they timed out at
+'no matching reply in chat ... within 60s'. Also fixes the dedup
+'_send_admin_dm is not defined' NameError so POSSIBLE DUPLICATE alerts send.
+
+================================================================================
 v53 - TRUE PARALLEL SCRAPING (free-slot dispatcher) + COMPACT /stats GLYPHS
 ================================================================================
 Files changed: bot.py, botapi.py. The parallel dispatcher no longer waits for a
