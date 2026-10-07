@@ -1,4 +1,25 @@
 ================================================================================
+v58 - BYPASS RICH-MESSAGE HARVEST (the REAL fix) + /help chunking
+================================================================================
+Files changed: flow.py, botapi.py  (README.md, README_PATCH.txt updated).
+Deploy: replace both files in the repo root and redeploy Render.
+
+ROOT CAUSE (proven by the /probebypass stringify dump): Tobi Bypass Bot's reply
+is a Bot API RICH MESSAGE — message='', entities=[], reply_markup=None, and ALL
+content lives in m.rich_message.blocks (PageBlockParagraph / collapsed
+PageBlockBlockquote holding the t.me deep link / PageBlockButtonRow with
+PageButton.type.url). Every prior fix read the classic (empty) fields. NOT a
+font issue, NOT a layer issue (re-auth NOT needed), NOT a clipboard button.
+
+WHAT CHANGED:
+  * flow.py _rich_strings()/_harvest_block() — recursively flatten the
+    rich_message block tree and harvest every URL/string, including collapsed
+    blockquotes and caption-button URLs / copy payloads. Both the reply
+    DETECTOR and the link PARSER call _msg_urls(), so both pick this up.
+  * botapi.py /help — command list outgrew the 4096-char cap and crashed
+    (Unhandled exception on help_cmd); now chunked at 3800 chars.
+
+================================================================================
 v57.1 - DIAGNOSTIC FIX (stringify dump + correct LAYER path) + RE-AUTH ACTION
 ================================================================================
 Files changed: bot.py, botapi.py  (README.md, README_PATCH.txt updated).

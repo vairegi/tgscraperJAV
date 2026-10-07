@@ -58,6 +58,49 @@ async def _last_id(client, entity):
     return msgs[0].id if msgs else 0
 
 
+def _rich_strings(node):
+    """v58: recursively collect every string out of a Bot API RichText node
+    (TextConcat/TextPlain/TextBold/TextAutoUrl/TextUrl/...). Tobi Bypass Bot's
+    reply is a RichMessage — ALL content lives in rich_message.blocks, while
+    message/entities/reply_markup are empty. This flattens the nested tree."""
+    if node is None:
+        return []
+    out = []
+    t = getattr(node, "text", None)
+    if isinstance(t, str) and t:
+        out.append(t)
+    elif t is not None:
+        out.extend(_rich_strings(t))          # nested rich text (TextBold.text ...)
+    for sub in (getattr(node, "texts", None) or []):   # TextConcat.texts
+        out.extend(_rich_strings(sub))
+    u = getattr(node, "url", None)            # TextUrl-style hyperlink node
+    if isinstance(u, str) and u:
+        out.append(u)
+    return out
+
+
+def _harvest_block(blk, urls):
+    """v58: pull every URL/string from one PageBlock* — its text, caption,
+    nested sub-blocks (PageBlockBlockquoteBlocks) and caption buttons
+    (PageBlockButtonRow -> PageButton.type.url / copy payload)."""
+    urls.extend(_rich_strings(blk))
+    cap = getattr(blk, "caption", None)
+    if cap is not None:
+        urls.extend(_rich_strings(cap))
+    for sub in (getattr(blk, "blocks", None) or []):
+        _harvest_block(sub, urls)
+    for b in (getattr(blk, "buttons", None) or []):
+        urls.extend(_rich_strings(getattr(b, "text", None)))
+        bt = getattr(b, "type", None)
+        u = getattr(bt, "url", None)
+        if isinstance(u, str) and u:
+            urls.append(u)
+        for attr in ("copy_text", "text"):
+            ct = getattr(bt, attr, None)
+            if isinstance(ct, str) and ct:
+                urls.append(ct)
+
+
 def _msg_urls(m):
     """v54: every URL a message CARRIES — not just its literal text. Bypass
     bots (e.g. Tobi Bypass Bot) hide the bypassed t.me deep link inside a
@@ -97,6 +140,11 @@ def _msg_urls(m):
                 ct = getattr(b, "text", None)
                 if ct:
                     urls.append(ct)
+    # v58: RichMessage replies keep everything in rich_message.blocks
+    # (message/entities/reply_markup stay empty) — harvest the block tree.
+    rich = getattr(m, "rich_message", None)
+    for blk in (getattr(rich, "blocks", None) or []):
+        _harvest_block(blk, urls)
     return urls
 
 

@@ -1,4 +1,14 @@
 ================================================================================
+v58 - BYPASS RICH-MESSAGE HARVEST (the REAL fix) + /help chunking
+================================================================================
+Files changed: flow.py, botapi.py. Tobi Bypass Bot replies are Bot API rich
+messages — message/entities/reply_markup are empty; everything lives in
+rich_message.blocks (collapsed blockquote holds the t.me deep link; caption
+buttons are PageButton rows). flow.py now flattens and harvests that block tree
+(detector + parser both use it). /help is chunked (it exceeded the 4096-char cap
+and crashed). Re-auth is NOT needed — the layer was a red herring.
+
+================================================================================
 v57.1 - DIAGNOSTIC FIX (stringify dump + correct LAYER path) + RE-AUTH ACTION
 ================================================================================
 Files changed: bot.py, botapi.py. Telethon 1.45.0 = TL layer 229, but Tobi's

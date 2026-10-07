@@ -467,7 +467,10 @@ def register(scrape_client, sm=None):
                      "When LINK_BOT renames its button: /linkbutton <new text> — "
                      "active instantly, no restart. "
                      "Caught-up channels re-scan for new posts every 30s.")
-        await ev.reply("\n".join(lines))
+        # v58: the command list outgrew Telegram's 4096-char cap — chunk it
+        txt = "\n".join(lines)
+        for k in range(0, len(txt), 3800):
+            await ev.reply(txt[k:k + 3800])
 
     # ---------- v39.1: /checkram — RAM usage ----------
     @bot.on(events.NewMessage(pattern=r"^/checkram$"))
