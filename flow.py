@@ -81,12 +81,18 @@ def _msg_urls(m):
 
 
 async def _wait_new(client, entity, after_id, timeout, need_button=None, need_text=None):
-    """Poll a chat for the oldest message with id > after_id that matches filters."""
+    """Poll a chat for the oldest message with id > after_id that matches filters.
+    v55: fast bypass bots (Tobi ~1s) can answer and scroll PAST the tiny
+    min_id window before the next poll — especially when the caller was busy
+    (config wait / paused loop) so the 'after_id' baseline is already stale.
+    Each poll now re-reads a WIDER slice of recent history (min_id is kept,
+    but the limit is larger) so an already-arrived reply is matched on the
+    very next fetch instead of timing out for 60s."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         if state.abort:
             raise Abort()
-        msgs = await client.get_messages(entity, limit=8, min_id=after_id)
+        msgs = await client.get_messages(entity, limit=30, min_id=after_id)
         for m in sorted([m for m in msgs if m and m.id > after_id], key=lambda x: x.id):
             if need_button and not find_button(m, need_button):
                 continue
@@ -154,17 +160,33 @@ async def _bypass_once(client, endpoint, short_link, link_bot, msg, worker_name=
     is_bot = isinstance(ent, User) and getattr(ent, "bot", False)
     await _stage(worker_name, f"waiting bypass {'bot' if is_bot else 'group'} reply ({endpoint})")
     sent = await client.send_message(endpoint, short_link)
+    # v55: catch-up — if the endpoint already replied (fast bot, or the caller
+    # was stuck in a config/paused wait so the baseline is stale), grab the
+    # NEWEST matching reply right now instead of starting a fresh 60s poll
+    # over a window that has already scrolled past.
     try:
+        recent = await client.get_messages(endpoint, limit=30, min_id=sent.id)
+        recent = sorted([m for m in recent if m and m.id > sent.id], key=lambda x: x.id)
+    except Exception:
+        recent = []
+    def _ok(m):
         if is_bot:
-            bm = await _wait_new(client, endpoint, sent.id, WAIT_BYPASS_REPLY,
-                                 need_text="t.me/")
-        else:
-            bm = await _wait_new(client, endpoint, sent.id, WAIT_BYPASS_REPLY,
-                                 need_button=BTN_OPEN_LINK)
-    except Abort:
-        raise
-    except Exception as e:
-        raise BypassFailed(f"{endpoint}: {e}")
+            return norm("t.me/") in norm(m.text or m.message or "") or \
+                   norm("t.me/") in norm(" ".join(_msg_urls(m)))
+        return bool(find_button(m, BTN_OPEN_LINK))
+    bm = next((m for m in reversed(recent) if _ok(m)), None)
+    if bm is None:
+        try:
+            if is_bot:
+                bm = await _wait_new(client, endpoint, sent.id, WAIT_BYPASS_REPLY,
+                                     need_text="t.me/")
+            else:
+                bm = await _wait_new(client, endpoint, sent.id, WAIT_BYPASS_REPLY,
+                                     need_button=BTN_OPEN_LINK)
+        except Abort:
+            raise
+        except Exception as e:
+            raise BypassFailed(f"{endpoint}: {e}")
 
     if is_bot:
         # formatted reply, e.g. '◈ Bypassed Link ➤ https://t.me/<bot>?start=...'

@@ -1,4 +1,30 @@
 ================================================================================
+v55 - BYPASS REPLY RACE FIX (fast bots scrolled past the poll window)
+================================================================================
+Files changed: flow.py, config.py  (README.md, README_PATCH.txt updated).
+Deploy: replace both files in the repo root and redeploy Render. Optional:
+WAIT_BYPASS_REPLY can now be tuned via env (default raised 60 -> 90).
+
+WHY: v54 fixed the PARSING (collapsible-quote / button links) but the bypass
+STILL timed out with 'no matching reply in chat ... within 60s'. Root cause
+was a RACE, not the font and not the parsing: Tobi Bypass Bot answers in ~1s,
+but the caller was often still in the config-wait / all-targets-paused loop,
+so the send's baseline id was already stale. The reply landed and scrolled
+past the tiny min_id window before the next poll, so the 60s waiter never saw
+it — twice per post.
+
+WHAT CHANGED:
+  * flow.py _bypass_once — CATCH-UP step: after sending the link, it reads the
+    newest recent replies (limit 30) and matches one IMMEDIATELY (bot: a t.me
+    deep link in text OR entity/button via _msg_urls; group: the Open link
+    button) before falling back to the live 60s poll. An already-arrived reply
+    is used on the spot instead of timing out.
+  * flow.py _wait_new — polls a wider recent slice (limit 8 -> 30) so a reply
+    that arrived mid-gap is still in the window on the next fetch.
+  * config.py — WAIT_BYPASS_REPLY default 60 -> 90 (env-tunable), giving slow
+    bypass bots a little more room.
+
+================================================================================
 v54 - BYPASS LINK HARVEST FROM COLLAPSIBLE QUOTES / BUTTONS + dedup DM fix
 ================================================================================
 Files changed: flow.py, dedup.py  (README.md, README_PATCH.txt updated).

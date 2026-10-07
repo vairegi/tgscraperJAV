@@ -40,7 +40,7 @@ DB_NAME = os.environ.get("MONGO_DB", "tgscraper")
 
 # Timing (seconds) — tune via env if needed
 WAIT_BOT_REPLY = int(os.environ.get("WAIT_BOT_REPLY", "20"))      # wait for Fubuki/Rias reply
-WAIT_BYPASS_REPLY = int(os.environ.get("WAIT_BYPASS_REPLY", "60"))# wait for bypass group tag
+WAIT_BYPASS_REPLY = int(os.environ.get("WAIT_BYPASS_REPLY", "90"))  # v55: wider — fast bots scroll past the poll window
 POLL_INTERVAL = 1.5
 STEP_DELAY = float(os.environ.get("STEP_DELAY", "5"))    # pause between workflow steps
 POST_DELAY = float(os.environ.get("POST_DELAY", "45"))   # pause between posts

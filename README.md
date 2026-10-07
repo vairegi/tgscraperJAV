@@ -1,4 +1,15 @@
 ================================================================================
+v55 - BYPASS REPLY RACE FIX (fast bots scrolled past the poll window)
+================================================================================
+Files changed: flow.py, config.py. Tobi Bypass Bot answers in ~1s, but the
+worker was often still in the config/paused wait, so the reply landed and
+scrolled past the tiny min_id poll window before the next fetch — the 60s
+waiter then timed out twice per post. _bypass_once now CATCHES UP to the newest
+matching reply immediately (bot: t.me deep link in text/entity/button; group:
+Open link button) and _wait_new polls a wider slice (limit 8 -> 30).
+WAIT_BYPASS_REPLY default raised 60 -> 90 (env-tunable).
+
+================================================================================
 v54 - BYPASS LINK HARVEST FROM COLLAPSIBLE QUOTES / BUTTONS + dedup DM fix
 ================================================================================
 Files changed: flow.py, dedup.py. Bypass replies that hide the t.me deep link
