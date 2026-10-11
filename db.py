@@ -37,15 +37,19 @@ async def get_targets():
                         # v42: link discovery mode — existing docs migrate to the
                         # button default automatically, no redeploy needed
                         "link_mode": (t.get("link_mode") or "button"),
-                        "link_trigger": t.get("link_trigger")})
+                        "link_trigger": t.get("link_trigger"),
+                        # v59: seconds the bypassed link is held before being
+                        # followed (0 = instant, the pre-v59 behavior)
+                        "wait_time": int(t.get("wait_time") or 0)})
         else:
             out.append({"id": t, "db_id": None, "paused": False, "db2_id": None,
-                        "avoid": [], "link_mode": "button", "link_trigger": None})
+                        "avoid": [], "link_mode": "button", "link_trigger": None,
+                        "wait_time": 0})
     out = [t for t in out if t["id"] is not None]
     if not out and doc.get("target_id"):
         out = [{"id": doc["target_id"], "db_id": doc.get("db_id"), "paused": False,
                 "db2_id": None, "avoid": [], "link_mode": "button",
-                "link_trigger": None}]
+                "link_trigger": None, "wait_time": 0}]
     return out
 
 async def _save_targets(targets):
@@ -55,9 +59,12 @@ async def _save_targets(targets):
                   "target_id": targets[0]["id"] if targets else None}}, upsert=True)
     return targets
 
-async def add_target(tid, db_id=None, link_mode="button", link_trigger=None):
+async def add_target(tid, db_id=None, link_mode="button", link_trigger=None,
+                     wait_time=0):
     """v42: link_mode 'button' (default, inline Download button) or 'caption'
-    (hidden hyperlink behind the exact link_trigger caption text)."""
+    (hidden hyperlink behind the exact link_trigger caption text).
+    v59: wait_time = seconds to hold the bypassed link before following it
+    (counted from the LINK_BOT's short link; 0 = follow instantly)."""
     targets = await get_targets()
     for t in targets:
         if t["id"] == tid:
@@ -66,10 +73,13 @@ async def add_target(tid, db_id=None, link_mode="button", link_trigger=None):
             if link_mode:
                 t["link_mode"] = link_mode
                 t["link_trigger"] = link_trigger if link_mode in ("caption", "button") else None  # v51: button text too
+            if wait_time is not None:
+                t["wait_time"] = int(wait_time)  # v59
             return await _save_targets(targets)
     targets.append({"id": tid, "db_id": db_id, "db2_id": None, "avoid": [],
                     "link_mode": link_mode or "button",
-                    "link_trigger": link_trigger if link_mode in ("caption", "button") else None})  # v51
+                    "link_trigger": link_trigger if link_mode in ("caption", "button") else None,  # v51
+                    "wait_time": int(wait_time or 0)})  # v59
     return await _save_targets(targets)
 
 async def remove_target(tid):
@@ -104,6 +114,17 @@ async def set_target_link_mode(tid, mode, trigger=None):
         if t["id"] == tid:
             t["link_mode"] = mode
             t["link_trigger"] = trigger if mode in ("caption", "button") else None  # v51
+            return await _save_targets(targets)
+    return None  # target not found
+
+async def set_target_wait_time(tid, seconds):
+    """v59: set a target's wait time (seconds) — how long the bypassed link is
+    held before being followed, counted from the moment the LINK_BOT gave the
+    short link. 0 = follow instantly (the pre-v59 behavior)."""
+    targets = await get_targets()
+    for t in targets:
+        if t["id"] == tid:
+            t["wait_time"] = max(0, int(seconds))
             return await _save_targets(targets)
     return None  # target not found
 

@@ -393,6 +393,7 @@ async def scrape_loop(sm):
         cfg["link_mode"] = tsel.get("link_mode") or "button"
         cfg["link_trigger"] = tsel.get("link_trigger")
         cfg["db2_id"] = tsel.get("db2_id")  # v45.1: for dedup sibling sync
+        cfg["wait_time"] = tsel.get("wait_time") or 0  # v59: per-target bypassed-link wait
         pass_gen = state.reset_gen
         if len(targets) > 1:
             log.info("multi-target: %d channels, working on %s -> DB %s", len(targets), target, cfg["db_id"])

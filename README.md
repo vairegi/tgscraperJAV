@@ -1,4 +1,14 @@
 ================================================================================
+v59 - PER-TARGET WAIT TIME (/waittime)
+================================================================================
+Files changed: flow.py, bot.py, botapi.py, db.py. New /waittime command sets a
+per-target wait: the clock starts when the LINK_BOT gives its short link; the
+bypassed link is followed instantly once that link is >= N seconds old, else
+after the remaining seconds (a slow bypass is never delayed further). The
+/target wizard asks for the wait time on new targets; existing targets default
+to 0 (instant — old behavior). /help updated; /status shows the countdown.
+
+================================================================================
 v58 - BYPASS RICH-MESSAGE HARVEST (the REAL fix) + /help chunking
 ================================================================================
 Files changed: flow.py, botapi.py. Tobi Bypass Bot replies are Bot API rich

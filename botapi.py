@@ -50,6 +50,7 @@ _CMDS = [
     ("altbypass","Last-resort fallback bypass — tried after every pool bot fails"),
     ("linkbutton", "List or add LINK_BOT button labels (no restart)"),
     ("targatelinkmode", "v42: target link mode: /targatelinkmode <n> button|caption [text]"),
+    ("waittime", "v59: delay following the bypassed link until the LINK_BOT link is Ns old: /waittime <n> <s> (bare = list)"),
     ("keepimages", "v42: collect media-bot images too: /keepimages on|off (global)"),
     ("removelinkbutton", "Remove a LINK_BOT button label by number"),
     ("goto",     "Set a target's start message (/goto <n> <msg> or link)"),
@@ -92,6 +93,17 @@ _CMDS = [
 ]
 
 _pending = {}  # user_id -> (kind, extra)
+
+
+def _parse_seconds(raw):
+    """v59: parse a wait-time answer — '120' / '120s' / 'skip' / '0' -> int
+    seconds (negative clamps to 0); None when it isn't a number at all."""
+    r = (raw or "").strip().lower().rstrip("s").strip()
+    if r in ("skip", "-", "none", "off", ""):
+        return 0
+    if r.lstrip("-").isdigit():
+        return max(0, int(r))
+    return None
 _sm = [None]   # v40: SessionManager, set by register()
 _BG_TASKS = []  # v46: keep-alive refs for background tasks (DB2 tail-scan scheduler)
 log_mirror = logging.getLogger("db2mirror")
@@ -360,9 +372,10 @@ async def _build_board_rows(client):
 
 
 async def _add_target_with_db(scrape_client, ev, tid, dbid, db2=None,
-                              link_mode="button", link_trigger=None):
+                              link_mode="button", link_trigger=None, wait_time=0):
     """v42: link_mode 'button' (default) or 'caption' + the exact trigger text
-    that holds the hidden caption hyperlink."""
+    that holds the hidden caption hyperlink.
+    v59: wait_time = seconds the bypassed link is held before following it."""
     try:
         ent_t = await scrape_client.get_entity(tid)
     except Exception as e:
@@ -379,7 +392,7 @@ async def _add_target_with_db(scrape_client, ev, tid, dbid, db2=None,
     if not _entity_ok(ent_d, "channel"):
         await ev.reply(_not_a_channel_msg(dbid, "channel"))
         return
-    await DB.add_target(tid, dbid, link_mode, link_trigger)
+    await DB.add_target(tid, dbid, link_mode, link_trigger, wait_time)
     if db2 is not None:
         try:
             ent2 = await scrape_client.get_entity(db2)
@@ -390,12 +403,16 @@ async def _add_target_with_db(scrape_client, ev, tid, dbid, db2=None,
             await ev.reply(f"⚠️ Can't access that DB2 channel: {e}")
             return
         await DB.set_target_db2(tid, db2)
+    wt_line = (f"\n  Wait time: {wait_time}s — the bypassed link is followed once the "
+               f"LINK_BOT link is at least {wait_time}s old" if wait_time else
+               "\n  Wait time: instant (change anytime with /waittime)")
     await ev.reply(f"✅ Target saved:\n  {tid} → DB {dbid}"
                    + (f" → DB2 {db2} (bot clean-mirror ON — make sure the BOT is admin in DB and DB2)"
                       if db2 is not None else "")
                    + (f"\n  Link mode: CAPTION — trigger text: `{link_trigger}`"
                       if link_mode == "caption"
                       else f"\n  Link mode: BUTTON — button text: `{link_trigger or 'Download'}`")
+                   + wt_line
                    + "\n\n/targets to view all, /start to scrape.")
     # v45.1: a sibling target already scanned the SAME DB2? share its index
     # instantly — no second scan. Otherwise build once, in the background.
@@ -429,8 +446,8 @@ def register(scrape_client, sm=None):
         sections = [
             # v40: regrouped — mirror the order things are used in
             # v43.3: regrouped in workflow order
-            ("🎯 TARGETS & CHANNELS", ["target", "targatelinkmode", "targets",
-                "targets_text", "setdb", "setdb2", "adddb", "deltarget"]),
+            ("🎯 TARGETS & CHANNELS", ["target", "targatelinkmode", "waittime",
+                "targets", "targets_text", "setdb", "setdb2", "adddb", "deltarget"]),
             ("🔐 BYPASS SETUP", ["bypass", "addbypass", "removebypass",
                 "bypasslist", "domainbypass", "deldomain", "altbypass"]),
             ("🧼 CAPTION CLEANING (DB2)", ["keepimages", "avoid", "avoidtext",
@@ -1997,6 +2014,49 @@ def register(scrape_client, sm=None):
         await ev.reply(f"✅ Target {t['id']} now posts to DB {dbid}")
 
     # ---------- v42: per-target link mode (button vs caption hyperlink) ----------
+    @bot.on(events.NewMessage(pattern=r"^/waittime(?:\s+([\s\S]+))?$"))
+    async def waittime_cmd(ev):
+        """v59: /waittime -> list every target's wait time; /waittime <n> <s>
+        -> target #n holds the bypassed link until the LINK_BOT's short link is
+        at least <s> seconds old (a slow bypass is never delayed further).
+        0 = follow instantly (the pre-v59 behavior)."""
+        if not await _admin(ev.sender_id):
+            return
+        arg = (ev.pattern_match.group(1) or "").strip()
+        targets = await DB.get_targets()
+        if not targets:
+            await ev.reply("No target channels — add one with /target first.")
+            return
+        if not arg:
+            lines = ["⏱ **Wait times** (delay before following the bypassed link,"
+                     " counted from the LINK_BOT's short link):"]
+            for i, t in enumerate(targets):
+                w = int(t.get("wait_time") or 0)
+                lines.append(f"  {i+1}. `{t['id']}` — " + (f"**{w}s**" if w else "instant (0s)"))
+            lines.append("\nSet: /waittime <target #> <seconds> — e.g. /waittime 2 120. "
+                         "0 = instant. New targets are asked in the /target wizard.")
+            await ev.reply("\n".join(lines))
+            return
+        parts = arg.split()
+        if len(parts) != 2 or not parts[0].isdigit() or \
+                not (1 <= int(parts[0]) <= len(targets)):
+            await ev.reply("Usage: /waittime <target #> <seconds> — see /targets for numbers.")
+            return
+        secs = _parse_seconds(parts[1])
+        if secs is None:
+            await ev.reply(f"⚠️ `{parts[1]}` isn't a number of seconds — "
+                           f"e.g. /waittime {parts[0]} 120")
+            return
+        t = targets[int(parts[0]) - 1]
+        await DB.set_target_wait_time(t["id"], secs)
+        if secs:
+            await ev.reply(f"⏱ Target {parts[0]} (`{t['id']}`): wait time set to **{secs}s** — "
+                           "the bypassed link is followed only once the LINK_BOT link is "
+                           f"at least {secs}s old (already older = instant).")
+        else:
+            await ev.reply(f"⏱ Target {parts[0]} (`{t['id']}`): wait time cleared — "
+                           "bypassed links are followed instantly (old behavior).")
+
     @bot.on(events.NewMessage(pattern=r"^/targatelinkmode(?:\s+([\s\S]+))?$"))
     async def targatelinkmode_cmd(ev):
         """Change how a target's download link is found, without re-adding it:
@@ -2343,22 +2403,41 @@ def register(scrape_client, sm=None):
                                "so styled labels (𝗝𝗼𝗶𝗻) are fine.\nCancel: /cancel")
             return
         if kind == "target_btntext":  # v51: custom link-button text
-            _pending.pop(ev.sender_id, None)
             tid, dbid, db2 = extra
             bt = ev.raw_text.strip()
             bt = None if bt.lower() in ("skip", "-", "none", "default", "") else bt
-            await _add_target_with_db(scrape_client, ev, tid, dbid, db2,
-                                      "button", bt)
+            # v59: final wizard step — this target's wait time
+            _pending[ev.sender_id] = ("target_waittime", (tid, dbid, db2, "button", bt))
+            await ev.reply("Last step — WAIT TIME for this target: how many seconds "
+                           "old the LINK_BOT's link must be before the bypassed link is "
+                           "followed (e.g. `120`). Send `0` or `skip` to follow "
+                           "instantly (current behavior). Change anytime with /waittime.\n"
+                           "Cancel: /cancel")
             return
         if kind == "target_trigger":  # v42
-            _pending.pop(ev.sender_id, None)
             tid, dbid, db2 = extra
             trigger = ev.raw_text.strip()
             if not trigger:
                 await ev.reply("⚠️ Trigger text can't be empty — run /target again.")
                 return
+            # v59: final wizard step — this target's wait time
+            _pending[ev.sender_id] = ("target_waittime", (tid, dbid, db2, "caption", trigger))
+            await ev.reply("Last step — WAIT TIME for this target: how many seconds "
+                           "old the LINK_BOT's link must be before the bypassed link is "
+                           "followed (e.g. `120`). Send `0` or `skip` to follow "
+                           "instantly (current behavior). Change anytime with /waittime.\n"
+                           "Cancel: /cancel")
+            return
+        if kind == "target_waittime":  # v59: last /target wizard step
+            _pending.pop(ev.sender_id, None)
+            tid, dbid, db2, mode, trig = extra
+            wt = _parse_seconds(ev.raw_text)
+            if wt is None:
+                await ev.reply(f"⚠️ `{ev.raw_text.strip()}` isn't a number of seconds "
+                               "— run /target again (or set it later with /waittime).")
+                return
             await _add_target_with_db(scrape_client, ev, tid, dbid, db2,
-                                      "caption", trigger)
+                                      mode, trig, wt)
             return
         if kind == "deltarget":
             _pending.pop(ev.sender_id, None)

@@ -1,4 +1,30 @@
 ================================================================================
+v59 - PER-TARGET WAIT TIME (/waittime) — hold the bypassed link until the
+      LINK_BOT's link is N seconds old
+================================================================================
+Files changed: flow.py, bot.py, botapi.py, db.py  (README.md, README_PATCH.txt
+updated). Deploy: replace all four files in the repo root and redeploy Render.
+No data migration — existing targets default to 0 (instant = old behavior).
+
+WHY: the owner wants the bypassed link followed only after a minimum link age,
+not instantly. The clock starts when the LINK_BOT hands over its short link
+(e.g. https://arolinks.com/SP8BXP); when the bypass bot answers, the bypassed
+link is followed IMMEDIATELY if the link is already >= N seconds old, otherwise
+after the remaining seconds. A slow bypass is never delayed further.
+
+WHAT CHANGED:
+  * db.py — targets carry wait_time (seconds, default 0) and a new
+    set_target_wait_time() setter; all legacy target shapes migrate to 0.
+  * bot.py — the per-target cfg picks up wait_time next to link_mode/db2_id.
+  * flow.py — wait_start is stamped at short-link capture (button mode + both
+    caption paths); _bypass_once holds before following the bypassed link (the
+    bot-DM /start AND the group Open-link click), sleeping in 2s slices so
+    /skip and /pause stay responsive; /status shows the countdown.
+  * botapi.py — /waittime (bare = list every target's wait time;
+    /waittime <n> <s> sets one, '120' and '120s' both ok), the /target wizard
+    gained a final wait-time step ('0'/'skip' = instant), and /help lists it.
+
+================================================================================
 v58 - BYPASS RICH-MESSAGE HARVEST (the REAL fix) + /help chunking
 ================================================================================
 Files changed: flow.py, botapi.py  (README.md, README_PATCH.txt updated).

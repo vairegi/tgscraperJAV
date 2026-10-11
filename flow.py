@@ -213,8 +213,35 @@ async def _stage(name, txt):
         state.stage = txt
 
 
-async def _bypass_once(client, endpoint, short_link, link_bot, msg, worker_name=None):
-    """Send short_link to ONE bypass endpoint and follow the result.
+async def _wait_for_waittime(worker_name, wait_time, wait_start, msg_id):
+    """v59: hold before following the bypassed link. The clock started when the
+    LINK_BOT handed over its short link (wait_start). If that was already >=
+    wait_time seconds ago (a slow bypass bot), follow IMMEDIATELY — the wait is
+    a MINIMUM age for the link, never an extra delay on top of a slow bypass.
+    Sleeps in 2s slices so /skip and /pause stay responsive mid-wait, and
+    /status shows the countdown."""
+    if not wait_time or not wait_start:
+        return
+    remaining = wait_time - (time.time() - wait_start)
+    if remaining <= 0:
+        return
+    log.info("post %s: waittime — holding %ss before following the bypassed link "
+             "(link is %ss old, minimum %ss)", msg_id, int(remaining + 0.5),
+             int(time.time() - wait_start), wait_time)
+    while remaining > 0:
+        if state.abort:
+            raise Abort()
+        await _stage(worker_name,
+                     f"waittime: following bypassed link in {int(remaining)}s")
+        await asyncio.sleep(min(remaining, 2.0))
+        remaining = wait_time - (time.time() - wait_start)
+
+
+async def _bypass_once(client, endpoint, short_link, link_bot, msg, worker_name=None,
+                       wait_time=0, wait_start=None):
+    """v59: wait_time/wait_start — hold the bypassed link until the LINK_BOT's
+    short link is at least wait_time seconds old before following it.
+    Send short_link to ONE bypass endpoint and follow the result.
     - BOT endpoint (e.g. @dex_fekkyeww_bot): replies in DM with a formatted
       message — the bypassed link is the t.me/?start=... URL in its text.
     - GROUP endpoint: someone tags with an 'Open link' BUTTON — clicked.
@@ -292,6 +319,8 @@ async def _bypass_once(client, endpoint, short_link, link_bot, msg, worker_name=
                  msg.id, endpoint, new_bot)
         if new_bot != link_bot:
             link_bot = new_bot
+        # v59: don't follow a link that's too fresh — wait out the rest
+        await _wait_for_waittime(worker_name, wait_time, wait_start, msg.id)
         base_f = await _last_id(client, link_bot)
         await _stage(worker_name, f"opening bypassed link at @{link_bot}")
         await client.send_message(link_bot,
@@ -302,6 +331,8 @@ async def _bypass_once(client, endpoint, short_link, link_bot, msg, worker_name=
     # v42: base_f is taken AFTER the button is followed — with caption-mode
     # targets link_bot can still be unknown (None) here, so computing it
     # before the click was impossible; the open_bot result resolves the bot.
+    # v59: same wait applies before clicking the group's Open link button
+    await _wait_for_waittime(worker_name, wait_time, wait_start, msg.id)
     await _stage(worker_name, f"clicking Open link (back to @{link_bot})")
     _, _, open_bot = await _follow_button(bm, BTN_OPEN_LINK, client)
     if open_bot and open_bot != link_bot:
@@ -361,7 +392,8 @@ async def _alert_bypass_failure(short_link, endpoint, worker_name, target, msg_i
     log.warning("bypass failure alert sent: post %s link %s via %s", msg_id, short_link, endpoint)
 
 
-async def _bypass_chain(client, short_link, link_bot, msg, cfg, target, worker_name=None):
+async def _bypass_chain(client, short_link, link_bot, msg, cfg, target, worker_name=None,
+                        wait_time=0, wait_start=None):
     """v39: route the short link to its bypass endpoint and run it.
     ROUTING: if the link's domain matches a /domainbypass rule, ONLY that
     designated endpoint handles the link (other pool bots are NOT tried for
@@ -392,7 +424,8 @@ async def _bypass_chain(client, short_link, link_bot, msg, cfg, target, worker_n
                 raise Abort()
             try:
                 return await _bypass_once(client, endpoint, short_link,
-                                          link_bot, msg, worker_name)
+                                          link_bot, msg, worker_name,
+                                          wait_time, wait_start)
             except Abort:
                 raise
             except BypassFailed as e:
@@ -486,6 +519,8 @@ async def process_post(client, cfg, msg, worker_name=None):
     target, bypass, dbc = cfg["target_id"], cfg.get("bypass_id"), cfg["db_id"]
     link_mode = cfg.get("link_mode") or "button"          # v42
     link_trigger = cfg.get("link_trigger")                # v42
+    wait_time = int(cfg.get("wait_time") or 0)            # v59: per-target wait (s)
+    wait_start = None                                     # v59: stamped at short-link capture
 
     if link_mode == "caption":
         # v42: the download URL is an EMBEDDED hyperlink inside the caption
@@ -548,8 +583,10 @@ async def process_post(client, cfg, msg, worker_name=None):
                 short_link = first_url(lm.text)
             if not short_link:
                 raise RuntimeError("could not capture short link")
+            wait_start = time.time()  # v59: LINK_BOT just gave the short link
         else:
             short_link = cap_url
+            wait_start = time.time()  # v59: the caption itself held the short link
             log.info("post %s: caption link is the short link itself (no LINK_BOT hop)",
                      msg.id)
         await asyncio.sleep(STEP_DELAY)
@@ -613,6 +650,7 @@ async def process_post(client, cfg, msg, worker_name=None):
             short_link = first_url(lm.text)
         if not short_link:
             raise RuntimeError("could not capture short link")
+        wait_start = time.time()  # v59: LINK_BOT just gave the short link
 
         await asyncio.sleep(STEP_DELAY)
 
@@ -627,7 +665,8 @@ async def process_post(client, cfg, msg, worker_name=None):
     #    the scrape loop skips it per the existing error policy.
     try:
         link_bot, base_f = await _bypass_chain(client, short_link, link_bot,
-                                               msg, cfg, target, worker_name)
+                                               msg, cfg, target, worker_name,
+                                               wait_time, wait_start)
     except BypassFailed as e:
         await _alert_admin(client, target, msg, e)
         raise RuntimeError(f"all bypass endpoints failed ({e}) — admin alerted")
