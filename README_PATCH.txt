@@ -1,4 +1,40 @@
 ================================================================================
+v60 - CONTENT-PROTECTED TARGETS: DOWNLOAD + RE-UPLOAD THE COVER
+================================================================================
+Files changed: forwarder.py  (README.md, README_PATCH.txt updated). Deploy:
+replace forwarder.py in the repo root and redeploy Render. No DB migration, no
+env change, no re-auth.
+
+WHY: the render log shows posts 11, 12, 21 and 22 dying with
+telethon.errors.rpcerrorlist.ChatForwardsRestrictedError: "You can't forward
+messages from a protected chat (caused by SendMediaRequest)" — raised from
+forwarder._send_one -> client.send_file while re-sending the COVER BY
+REFERENCE. The v42 guard only checked msg.noforwards, which is MISSING when the
+channel's 'Restrict saving content' flag was switched ON AFTER the post was
+published, so the copy was attempted and Telegram refused it. Each post burned
+3 retries x 5s, then failed the whole post — cover AND its media were lost.
+
+WHAT CHANGED (forwarder.py only):
+  * download_and_reupload() — the protected path: download the cover media with
+    the userbot -> send_file it to the DB channel as a NEW post (same caption,
+    same buttons, same spoiler flag; a single document keeps its attributes +
+    mime type) -> delete the temp file(s) in `finally`, on success AND failure.
+  * _album_group() — if the cover post is an ALBUM (grouped_id), its media
+    siblings are fetched and re-uploaded together as one album, so no image of
+    the cover post is lost.
+  * _send_one() — ChatForwardsRestrictedError is raised IMMEDIATELY (no 3x
+    retry, no 15s of pointless 5s sleeps) so the caller can switch paths.
+  * send_cover() — protected when msg.noforwards OR the target already refused
+    once; a refusal from the by-reference send is caught and re-routed.
+  * send_media() — the same fallback per message, so a protected MEDIA chat can
+    never kill a post either.
+  * _PROTECTED memo — the first refusal marks that target; every later post on
+    it goes straight to download + re-upload, with no wasted failed attempt.
+
+NOTE: the DB2 clean mirror keeps working unchanged — the re-uploaded cover is a
+normal fresh post in the DB channel, so botapi mirrors it like any other.
+
+================================================================================
 v59 - PER-TARGET WAIT TIME (/waittime) — hold the bypassed link until the
       LINK_BOT's link is N seconds old
 ================================================================================

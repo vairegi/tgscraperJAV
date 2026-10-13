@@ -1,4 +1,17 @@
 ================================================================================
+v60 - CONTENT-PROTECTED TARGETS: DOWNLOAD + RE-UPLOAD THE COVER
+================================================================================
+Files changed: forwarder.py. Targets with Telegram content protection
+('Restrict saving content') refuse server-side copies with
+ChatForwardsRestrictedError — exactly what killed posts 11/12/21/22 in the
+render log. The cover (photo or whole album) is now downloaded by the userbot
+and re-uploaded to the DB channel as a brand-new post (same caption, buttons,
+spoiler), temp files always deleted. Detected from msg.noforwards AND from the
+error itself (protection switched on after a post was published leaves the
+per-message flag unset); the target is remembered so later posts skip the
+failed by-reference attempt. The DB2 clean mirror is unaffected.
+
+================================================================================
 v59 - PER-TARGET WAIT TIME (/waittime)
 ================================================================================
 Files changed: flow.py, bot.py, botapi.py, db.py. New /waittime command sets a

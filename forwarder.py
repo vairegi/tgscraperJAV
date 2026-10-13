@@ -20,7 +20,17 @@ media bot sends — videos, stickers, photos, texts — mirrored to the DB).
 
 Still zero downloads, zero temp files, no "Forwarded from" tag, and all
 video attributes (duration, thumbnail, filename, streaming, spoiler) are
-preserved because the same server-side file reference is reused."""
+preserved because the same server-side file reference is reused.
+
+v60: CONTENT-PROTECTED targets (Telegram "Restrict saving content" /
+noforwards) refuse server-side copies — ChatForwardsRestrictedError. Their
+files are DOWNLOADED with the userbot and RE-UPLOADED into the DB channel as
+brand-new messages (same caption/buttons/spoiler; a whole ALBUM travels as one
+album again), temp files deleted at once. Detected two ways: the per-message
+noforwards flag AND the error itself — protection can be switched on AFTER a
+post was published, which leaves the per-message flag unset (exactly what
+killed posts 11/12/21/22 in the render log). Once a target refuses a copy it is
+remembered, so every later post on it goes straight to download + re-upload."""
 import asyncio
 import logging
 import mimetypes
@@ -28,12 +38,14 @@ import os
 import tempfile
 
 from telethon.errors import (FileReferenceExpiredError, MediaInvalidError,
-                             MediaEmptyError)  # v39.2: MediaEmptyError = unusable ref too
+                             MediaEmptyError,
+                             ChatForwardsRestrictedError)  # v60: protected-chat copy refusal
 
 log = logging.getLogger("forwarder")
 
 SEND_RETRIES = 3
 RETRY_DELAY = 5  # seconds between send attempts
+TMP_PREFIX = "tgscraper_protected_"  # v60: temp files for downloaded media
 
 # v39: per-DB-channel delivery locks. With parallel multi-userbot scraping,
 # several workers can finish collecting at the same time — this lock
@@ -42,6 +54,11 @@ RETRY_DELAY = 5  # seconds between send attempts
 # never interleave. Keyed by DB channel id; created lazily on the running
 # event loop (Py3.14 has no loop at import time).
 _LOCKS = {}
+
+# v60: targets that refused a server-side copy (content protection). The first
+# ChatForwardsRestrictedError adds the target here, so every later post on it
+# goes straight to download + re-upload instead of a doomed by-reference send.
+_PROTECTED = set()
 
 
 def delivery_lock(dbc):
@@ -60,6 +77,128 @@ class StaleRef(Exception):
 
 def _spoiler(msg):
     return bool(getattr(getattr(msg, "media", None), "spoiler", False))
+
+
+def _file_ext(msg):
+    """v60: temp-file extension for a media message — photos are jpeg, a
+    document keeps its own mime type, else its original file name."""
+    doc = getattr(msg, "document", None)
+    if doc is None:
+        return ".jpg"
+    mt = (getattr(doc, "mime_type", "") or "").split(";")[0].strip()
+    if mt:
+        ext = mimetypes.guess_extension(mt)
+        if ext:
+            return ext
+    for attr in (getattr(doc, "attributes", None) or []):
+        fn = getattr(attr, "file_name", None)
+        if fn:
+            ext = os.path.splitext(fn)[1]
+            if ext:
+                return ext
+    return ""
+
+
+async def _album_group(client, msg, source):
+    """v60: a cover post can be an ALBUM. If this message carries a
+    grouped_id, pull its media siblings so the WHOLE cover travels together.
+    Falls back to [msg] when it isn't an album or the siblings can't be read."""
+    gid = getattr(msg, "grouped_id", None)
+    if not gid or source is None:
+        return [msg]
+    try:
+        ids = list(range(max(1, msg.id - 9), msg.id + 10))
+        raw = await client.get_messages(source, ids=ids)
+        sibs = [m for m in (raw or [])
+                if m is not None and getattr(m, "grouped_id", None) == gid
+                and getattr(m, "media", None) is not None]
+    except Exception:
+        return [msg]
+    if len(sibs) <= 1:
+        return [msg]
+    sibs.sort(key=lambda m: m.id)
+    return sibs
+
+
+async def _download_one(client, msg, source):
+    """v60: download ONE protected media message to a fresh temp file.
+    A dead file reference is refetched once and retried. Returns (path, tmp)."""
+    tmp = tempfile.mktemp(prefix=TMP_PREFIX, suffix=_file_ext(msg))
+    got = None
+    for attempt in (1, 2):
+        try:
+            got = await client.download_media(msg, file=tmp)
+            break
+        except FileReferenceExpiredError:
+            if attempt == 2 or source is None:
+                raise
+            fresh = await _refetch(client, msg, source)
+            if fresh is None:
+                raise
+            msg = fresh
+    if not got or not os.path.exists(tmp):
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        raise RuntimeError("protected media download returned nothing")
+    return got, tmp
+
+
+async def download_and_reupload(client, dbc, msg, caption=None, buttons=None,
+                                source=None):
+    """v60: PROTECTED-CONTENT path. The source chat forbids server-side copies
+    (Telegram 'Restrict saving content' / noforwards), so the file(s) are
+    DOWNLOADED with THIS account and RE-UPLOADED to the DB channel as a
+    brand-new message: same caption, same buttons, same spoiler flag; a single
+    document keeps its attributes + mime type, and an album stays an album. The
+    temp files are deleted in `finally` — on success AND on failure — so
+    Render's small disk never fills up."""
+    if caption is None:
+        caption = msg.message or ""
+    if getattr(msg, "media", None) is None:
+        return await _send_one(client, dbc, msg, source, caption=caption,
+                               buttons=buttons)
+    group = await _album_group(client, msg, source)
+    tmp_files = []
+    try:
+        paths = []
+        for m in group:
+            got, tmp = await _download_one(client, m, source)
+            tmp_files.append(tmp)
+            paths.append(got)
+        doc = getattr(group[0], "document", None)
+        kwargs = {"caption": caption, "buttons": buttons, "spoiler": _spoiler(group[0])}
+        if doc is not None and len(paths) == 1:
+            attrs = getattr(doc, "attributes", None)
+            if attrs:
+                kwargs["attributes"] = attrs
+            mt = (getattr(doc, "mime_type", "") or "").split(";")[0].strip()
+            if mt:
+                kwargs["mime_type"] = mt
+        r = await client.send_file(dbc, paths[0] if len(paths) == 1 else paths,
+                                   **kwargs)
+        out = list(r) if isinstance(r, (list, tuple)) else [r]
+        empties = [x for x in out if not getattr(x, "media", None)]
+        for x in empties:
+            try:
+                await x.delete()
+            except Exception:
+                pass
+        if empties:
+            raise RuntimeError("protected re-upload produced an empty message")
+        ids = ", ".join(str(getattr(x, "id", "?")) for x in out)
+        log.info("protected content: msg %s (%d file(s)) downloaded + re-uploaded"
+                 " -> DB msg %s", getattr(msg, "id", "?"), len(paths), ids)
+        return out[0]
+    finally:
+        for t in tmp_files:
+            try:
+                if os.path.exists(t):
+                    os.remove(t)
+            except OSError:
+                pass
 
 
 async def _refetch(client, msg, source):
@@ -132,6 +271,12 @@ async def _send_one(client, dbc, msg, source, caption=None, buttons=None):
                 break  # refetch found nothing — give up with the error
             msg = fresh
             media = fresh.media
+        except ChatForwardsRestrictedError:
+            # v60: deterministic refusal — the source chat forbids server-side
+            # copies. Retrying the identical send is pointless (the old code
+            # burned 3 attempts x 5s here), so raise NOW and let the caller
+            # switch to the download + re-upload path.
+            raise
         except Exception as e:
             last_err = e
             log.warning("send attempt %d/%d failed for msg %s: %s",
@@ -153,31 +298,31 @@ async def send_cover(client, target, msg, dbc):
     on success AND on failure — so Render's small disk never fills up. The
     new DB post is a fresh userbot post (not restricted), so the DB2 clean
     mirror keeps working on it normally."""
-    if getattr(msg, "noforwards", False) and getattr(msg, "media", None) is not None:
-        ext = ".jpg"  # Telegram photos are jpeg; documents keep their own type
-        doc = getattr(msg, "document", None)
-        if doc is not None:
-            ext = (mimetypes.guess_extension(
-                (getattr(doc, "mime_type", "") or "").split(";")[0].strip()) or "")
-        tmp = tempfile.mktemp(prefix="tgscraper_cover_", suffix=ext)
-        try:
-            got = await client.download_media(msg, file=tmp)
-            if not got:
-                raise RuntimeError("restricted cover download returned nothing")
-            r = await client.send_file(dbc, got, caption=msg.message or "",
-                                       buttons=msg.buttons, spoiler=_spoiler(msg))
-            log.info("restricted target %s: cover re-uploaded as new DB msg %s",
-                     target, getattr(r, "id", "?"))
-            return
-        finally:
-            # disk hygiene: the temp file goes away even if upload failed
-            try:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-            except OSError:
-                pass
-    await _send_one(client, dbc, msg, target,
-                    caption=msg.message or "", buttons=msg.buttons)
+    # v42/v60: content-protected target -> download + re-upload (a server-side
+    # copy is forbidden). Proactive check on the per-message flag, plus the
+    # _PROTECTED memo filled the moment a target refuses a copy.
+    if getattr(msg, "media", None) is not None and (
+            getattr(msg, "noforwards", False) or target in _PROTECTED):
+        return await download_and_reupload(client, dbc, msg,
+                                           caption=msg.message or "",
+                                           buttons=msg.buttons, source=target)
+    try:
+        await _send_one(client, dbc, msg, target,
+                        caption=msg.message or "", buttons=msg.buttons)
+    except ChatForwardsRestrictedError:
+        # v60: the per-message noforwards flag is MISSING when the channel's
+        # 'Restrict saving content' switch was turned on AFTER this post was
+        # published — Telegram still refuses the copy. Remember the target so
+        # every later post skips the doomed attempt, then download + re-upload.
+        _PROTECTED.add(target)
+        if getattr(msg, "media", None) is None:
+            raise
+        log.warning("target %s is content-protected (ChatForwardsRestricted) — "
+                    "falling back to download + re-upload for cover msg %s",
+                    target, getattr(msg, "id", "?"))
+        return await download_and_reupload(client, dbc, msg,
+                                           caption=msg.message or "",
+                                           buttons=msg.buttons, source=target)
 
 
 async def send_media(client, src, msgs, dbc):
@@ -188,7 +333,11 @@ async def send_media(client, src, msgs, dbc):
     file server-side; we never touch the bytes."""
     ok = 0
     for m in msgs:
-        await _send_one(client, dbc, m, src)
+        try:
+            await _send_one(client, dbc, m, src)
+        except ChatForwardsRestrictedError:
+            # v60: a protected MEDIA source can never kill a post either
+            await download_and_reupload(client, dbc, m, source=src)
         ok += 1
     log.info("delivered %d/%d message(s) to DB channel", ok, len(msgs))
 
