@@ -715,7 +715,13 @@ def register(scrape_client, sm=None):
     import unicodedata as _ud
     MENTION_REPLACEMENT = "@NSFW_Universe"
     _URL_RE = re.compile(r"(?:https?://)?(?:t\.me|telegram\.me)/\S+|https?://\S+")
-    _MENTION_RE = re.compile(r"[@\uff20\ufe6b](?:\w*[^\W_])?")
+    # v61: a mention must start a token, never occur inside a word/email.
+    # Keep Unicode word boundaries and the existing styled @ variants.
+    _MENTION_RE = re.compile(r"(?<!\w)[@\uff20\ufe6b]\w*[^\W_]")
+    # Handle __@user__ before the boundary check (the opening '_' is a word
+    # character); require matching wrappers and a token boundary before them.
+    _WRAPPED_MENTION_RE = re.compile(
+        r"(?<!\w)([*_`]{1,3})[@\uff20\ufe6b]\w*[^\W_]\1")
     # the caption goes to DB2 as PLAIN text so they were literal characters.
     # markdown wrappers around a handle (**@user** / __@user__ / `@user`) are
     # dropped as well - the caption reaches DB2 as PLAIN text, so those
@@ -769,7 +775,8 @@ def register(scrape_client, sm=None):
         return r"\s*".join(parts)
 
     def _swap_mentions(t):
-        """Every @handle becomes MENTION_REPLACEMENT - never dropped."""
+        """Replace token-leading @handles, preserving embedded @ in words."""
+        t = _WRAPPED_MENTION_RE.sub(MENTION_REPLACEMENT, t)
         t = _MENTION_RE.sub(MENTION_REPLACEMENT, t)
         return _MENT_WRAP_RE.sub(MENTION_REPLACEMENT, t)
 
@@ -816,7 +823,7 @@ def register(scrape_client, sm=None):
         return re.sub(r"[ \t]{2,}", " ", t)
 
     def _clean_caption(text, avoids):
-        """Strip /avoid strings, strip URLs, rewrite every @mention to
+        """Strip /avoid strings, strip URLs, rewrite token-leading @mentions to
         MENTION_REPLACEMENT, drop lines with no letters at all, tidy whitespace.
         Sent as plain text, so embedded-link formatting dies with the entities."""
         t = _strip_avoids(text or "", avoids)

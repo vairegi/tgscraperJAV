@@ -1,4 +1,20 @@
 ================================================================================
+v61 - DB2 CAPTIONS: REPLACE TOKEN-LEADING MENTIONS ONLY
+================================================================================
+Files changed: botapi.py (README.md, README_PATCH.txt updated).
+Replace botapi.py in the server repo root and redeploy/restart the bot.
+No database migration, environment change, laptop update or bridge reinstall.
+
+@codeReo becomes @NSFW_Universe; code@Reo and d@rkturn remain unchanged.
+Mentions at the start of a caption, after whitespace or punctuation still
+replace; word characters (Unicode letters, digits, underscores) before @
+prevent replacement. Matching Markdown-wrapped handles remain supported.
+A bare @ is not a username and is left alone. URL stripping, /avoid,
+/replaceword, media delivery, ordering and deduplication are unchanged.
+Explicit /avoid and /replaceword rules still apply independently.
+Existing DB2 messages are not retroactively edited.
+
+================================================================================
 v60 - CONTENT-PROTECTED TARGETS: DOWNLOAD + RE-UPLOAD THE COVER
 ================================================================================
 Files changed: forwarder.py. Targets with Telegram content protection
