@@ -1,4 +1,27 @@
 ================================================================================
+v62 - BYPASS REPLIES: TELEGRAM.ME ALIAS + VALID START-LINK MATCHING
+================================================================================
+Files changed: flow.py, scraper.py (README.md, README_PATCH.txt updated).
+Deploy both Python files together to the server repository and redeploy Render.
+No Mongo migration, environment change, laptop update or bridge reinstall.
+
+Alex's result uses telegram.me/<bot>?start=... while older harvesting accepted
+only t.me. A t.me developer credit then made a successful reply look invalid.
+Both domains now work in text, quote/rich blocks, hidden entities and URL/copy
+buttons. Payload case is preserved. Developer credits and update links without
+start payloads cannot qualify as a completed bypass reply. Pending messages are
+re-read so edits can supply the final result; old/outgoing replies are ignored.
+Diagnostics report message IDs/counts/shapes, without logging start payloads.
+Small-cap labels need not be normalized because detection uses URLs, not labels.
+Group Open-link handling, waittime, media delivery and DB2 cleaning unchanged.
+Existing same-account, same-endpoint reply correlation remains history-based;
+this is not a new queue or a concurrency redesign.
+Previously failed posts are not automatically replayed: use /goto for the
+correct target and earliest failed source post, after stopping current work.
+Sandbox tests use real Telethon message/entity/button types and mocked I/O;
+no live Telegram, Render or Mongo operations were performed.
+
+================================================================================
 v61 - DB2 CAPTIONS: REPLACE TOKEN-LEADING MENTIONS ONLY
 ================================================================================
 Files changed: botapi.py (README.md, README_PATCH.txt updated).

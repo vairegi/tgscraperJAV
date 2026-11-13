@@ -21,7 +21,7 @@ import forwarder
 
 # any tg link (with or without scheme) — used to harvest URLs from a bot's
 # formatted reply that may embed several links (Original + Bypassed + credits)
-_TG_URL_RE = re.compile(r"(?:https?://)?t\.me/[A-Za-z0-9_]+(?:\?start=[A-Za-z0-9_\-]+)?")
+_TG_URL_RE = re.compile(r"(?<![\w./@-])(?:https?://)?(?:t\.me|telegram\.me)/[A-Za-z0-9_]+(?:\?start=[A-Za-z0-9_\-]+)?", re.I)
 
 class Abort(Exception):
     pass
@@ -101,6 +101,27 @@ def _harvest_block(blk, urls):
                 urls.append(ct)
 
 
+def _button_urls(button):
+    """Accept legacy buttons, MessageButton wrappers and typed inline buttons."""
+    urls = []
+    nodes = [button, getattr(button, "button", None)]
+    for node in list(nodes):
+        if node is not None:
+            nodes.append(getattr(node, "type", None))
+    for node in nodes:
+        if node is None:
+            continue
+        for attr in ("url", "copy_text"):
+            value = getattr(node, attr, None)
+            if isinstance(value, str) and value:
+                urls.append(value)
+        if type(node).__name__ == "KeyboardButtonCopy":
+            value = getattr(node, "text", None)
+            if isinstance(value, str) and value:
+                urls.append(value)
+    return urls
+
+
 def _msg_urls(m):
     """v54: every URL a message CARRIES — not just its literal text. Bypass
     bots (e.g. Tobi Bypass Bot) hide the bypassed t.me deep link inside a
@@ -117,6 +138,7 @@ def _msg_urls(m):
             urls.append(u)
     for row in (getattr(m, "buttons", None) or []):
         for b in (row or []):
+            urls.extend(_button_urls(b))
             u = getattr(b, "url", None)
             if u:
                 urls.append(u)
@@ -133,6 +155,7 @@ def _msg_urls(m):
     rm = getattr(m, "reply_markup", None)
     for row in (getattr(rm, "rows", None) or []):
         for b in (getattr(row, "buttons", None) or []):
+            urls.extend(_button_urls(b))
             u = getattr(b, "url", None)
             if u:
                 urls.append(u)
@@ -146,6 +169,47 @@ def _msg_urls(m):
     for blk in (getattr(rich, "blocks", None) or []):
         _harvest_block(blk, urls)
     return urls
+
+
+def _bypass_start_urls(message):
+    """v62: extract only usable starts, never developer/update-channel credits.
+    Labels/quote formatting are irrelevant; payload bytes retain their case.
+    """
+    strings = [getattr(message, "message", None) or
+               getattr(message, "text", None) or ""] + _msg_urls(message)
+    urls = []
+    for text in strings:
+        for url in _TG_URL_RE.findall(text):
+            bot, payload = parse_tg_start(url)
+            if bot and payload and url not in urls:
+                urls.append(url)
+    return urls
+
+
+async def _wait_bypass_reply(client, endpoint, after_id, timeout):
+    """Re-read pending/edited replies until a real deep link is available."""
+    deadline = time.monotonic() + timeout
+    seen = set()
+    while time.monotonic() < deadline:
+        if state.abort:
+            raise Abort()
+        messages = await client.get_messages(endpoint, limit=30, min_id=after_id)
+        for message in sorted((m for m in messages if m and m.id > after_id),
+                              key=lambda m: m.id, reverse=True):
+            if getattr(message, "out", False):
+                continue
+            urls = _bypass_start_urls(message)
+            shape = (message.id, bool(urls))
+            if shape not in seen:
+                seen.add(shape)
+                log.info("bypass-reply endpoint=%s msg=%s usable_starts=%s "
+                         "entities=%s rich=%s", endpoint, message.id, len(urls),
+                         len(getattr(message, "entities", None) or []),
+                         bool(getattr(message, "rich_message", None)))
+            if urls:
+                return message
+        await asyncio.sleep(POLL_INTERVAL)
+    raise TimeoutError(f"no usable Telegram start link from {endpoint} within {timeout}s")
 
 
 async def _wait_new(client, entity, after_id, timeout, need_button=None, need_text=None):
@@ -266,15 +330,13 @@ async def _bypass_once(client, endpoint, short_link, link_bot, msg, worker_name=
         recent = []
     def _ok(m):
         if is_bot:
-            return norm("t.me/") in norm(m.text or m.message or "") or \
-                   norm("t.me/") in norm(" ".join(_msg_urls(m)))
+            return not getattr(m, "out", False) and bool(_bypass_start_urls(m))
         return bool(find_button(m, BTN_OPEN_LINK))
     bm = next((m for m in reversed(recent) if _ok(m)), None)
     if bm is None:
         try:
             if is_bot:
-                bm = await _wait_new(client, endpoint, sent.id, WAIT_BYPASS_REPLY,
-                                     need_text="t.me/")
+                bm = await _wait_bypass_reply(client, endpoint, sent.id, WAIT_BYPASS_REPLY)
             else:
                 bm = await _wait_new(client, endpoint, sent.id, WAIT_BYPASS_REPLY,
                                      need_button=BTN_OPEN_LINK)
@@ -305,11 +367,8 @@ async def _bypass_once(client, endpoint, short_link, link_bot, msg, worker_name=
         # (collapsible-quote / inline-hyperlink replies, Tobi-Bypass-Bot style).
         # Raw (un-normalized) strings, so the case-sensitive ?start= payload
         # keeps its exact mixed case.
-        text = bm.text or bm.message or ""
-        urls = _TG_URL_RE.findall(text) + _TG_URL_RE.findall(" ".join(_msg_urls(bm)))
-        urls = list(dict.fromkeys(urls))   # dedupe, keep order
-        start_urls = [u for u in urls if "?start=" in u]
-        bypassed_url = (start_urls or urls)[-1] if urls else None
+        urls = _bypass_start_urls(bm)
+        bypassed_url = urls[-1] if urls else None
         if not bypassed_url:
             raise BypassFailed(f"bypass bot {endpoint} replied with no t.me link")
         new_bot, payload_in = parse_tg_start(bypassed_url)

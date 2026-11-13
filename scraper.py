@@ -95,7 +95,7 @@ def why_not_post(msg, link_mode="button", link_trigger=None):
     return ""
 
 
-TG_LINK_RE = re.compile(r"(?:https?://)?t\.me/([A-Za-z0-9_]+)\?start=([A-Za-z0-9_\-]+)")
+TG_LINK_RE = re.compile(r"(?<![\w./@-])(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]+)\?start=([A-Za-z0-9_\-]+)", re.I)
 URL_RE = re.compile(r"https?://\S+")
 C_LINK_RE = re.compile(r"(?:https?://)?t\.me/c/(\d+)/(\d+)")
 
