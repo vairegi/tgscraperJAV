@@ -144,6 +144,14 @@ async def _parallel_one(client, cfg, msg, idx, name, resolved):
         state.workers.pop(name, None)
 
 
+async def _check_scrape_duplicate(target, caption, cfg, *, possible=False):
+    """Only the pre-scrape checks are switchable; indexing continues."""
+    if cfg.get("duplicate_scan_enabled") is False:
+        return None
+    lookup = dedup.find_possible_dup if possible else dedup.already_indexed
+    return await lookup(target, caption)
+
+
 async def _parallel_pass(sm, target, cfg, last_id, pass_gen):
     """v39: PARALLEL multi-userbot dispatcher for ONE target at a time.
     All available accounts share this target's pending posts — account 1
@@ -184,7 +192,7 @@ async def _parallel_pass(sm, target, cfg, last_id, pass_gen):
             # v45: DB2 duplicate gate — a cover already archived in DB2
             # skips the WHOLE chain (Download click, bypass, DB bundle +
             # DB2 mirror). Marked non-post so the watermark advances.
-            _dup = await dedup.already_indexed(target, msg.message or "")
+            _dup = await _check_scrape_duplicate(target, msg.message or "", cfg)
             if _dup:
                 logging.info("DUP SKIP: msg %s already in DB2 (100%% exact match) -- skipped", msg.id)
                 await dedup.record_skip(target, msg.id, 100.0, _dup[0], _dup[2] if len(_dup) > 2 else None)
@@ -201,7 +209,7 @@ async def _parallel_pass(sm, target, cfg, last_id, pass_gen):
                 # Moved INSIDE the else: v49 ran this even after an exact-match
                 # skip, so every skipped dupe fired a second, confusing
                 # "POSSIBLE DUPLICATE" DM on top of the "DUPLICATE SKIPPED" DM.
-                _p = await dedup.find_possible_dup(target, msg.message or "")
+                _p = await _check_scrape_duplicate(target, msg.message or "", cfg, possible=True)
                 if _p:
                     mfp, sc, mmid = _p
                     logging.info("POSSIBLE DUPE: msg %s near %s in DB2 (%.1f%%) -- processing", msg.id, mmid, sc)
@@ -394,6 +402,7 @@ async def scrape_loop(sm):
         cfg["link_trigger"] = tsel.get("link_trigger")
         cfg["db2_id"] = tsel.get("db2_id")  # v45.1: for dedup sibling sync
         cfg["wait_time"] = tsel.get("wait_time") or 0  # v59: per-target bypassed-link wait
+        cfg["duplicate_scan_enabled"] = tsel.get("duplicate_scan_enabled", True)
         pass_gen = state.reset_gen
         if len(targets) > 1:
             log.info("multi-target: %d channels, working on %s -> DB %s", len(targets), target, cfg["db_id"])
@@ -436,7 +445,7 @@ async def scrape_loop(sm):
                     continue
                 # v45: DB2 duplicate gate (sequential path) — same as the
                 # parallel gate above; progress advances like a normal skip
-                _dup = await dedup.already_indexed(target, msg.message or "")
+                _dup = await _check_scrape_duplicate(target, msg.message or "", cfg)
                 if _dup:
                     logging.info("DUP SKIP: msg %s already in DB2 (100%% exact match) -- skipped", msg.id)
                     await dedup.record_skip(target, msg.id, 100.0, _dup[0], _dup[2] if len(_dup) > 2 else None)
@@ -447,7 +456,7 @@ async def scrape_loop(sm):
                     continue
 
                 # v49: partial / near match -> alert admin, still process.
-                _p = await dedup.find_possible_dup(target, msg.message or "")
+                _p = await _check_scrape_duplicate(target, msg.message or "", cfg, possible=True)
                 if _p:
                     mfp, sc, mmid = _p
                     logging.info("POSSIBLE DUPE: msg %s near %s in DB2 (%.1f%%) -- processing", msg.id, mmid, sc)

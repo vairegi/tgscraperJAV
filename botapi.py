@@ -29,7 +29,9 @@ bot = None  # created lazily inside start() (Py3.14 has no loop at import time)
 
 _CMDS = [
     # v40: regrouped for the tappable menu — related commands sit together
-    ("help",     "Show all commands"),
+    ("help",     "Show the quick guide and command directory"),
+    ("disableduplicatescan", "Turn off automatic duplicate checks for a target; no number lists status"),
+    ("enableduplicatescan", "Turn automatic duplicate checks back on for a target"),
     ("ping",     "Check the bot is alive"),
     ("stats",    "v52: rich worker/membership table (compact Bot API table)"),
     ("addworker",  "v52: add a scraping worker live: /addworker <session string> (bare = list all)"),
@@ -91,6 +93,60 @@ _CMDS = [
     ("replaceword",  "DB2 GLOBAL replace: /replaceword \"old\" \"new\" (bare = list)"),
     ("removereplace", "Remove a replace rule: /removereplace <#>"),
 ]
+
+def _line_pages(lines, limit=3500):
+    """Chunk at line breaks, using Telegram UTF-16 units as a safe budget."""
+    page = []
+    size = 0
+    for line in lines:
+        width = len(line.encode("utf-16-le")) // 2
+        if page and size + 1 + width > limit:
+            yield "\n".join(page).rstrip()
+            page, size = [], 0
+        size += width + bool(page)
+        page.append(line)
+    if page:
+        yield "\n".join(page).rstrip()
+
+
+_HELP_SECTIONS = (
+    ("Scraper controls", "start pause resume status current progress skip stop goto reset lastpost"),
+    ("Targets and channels", "target targets targets_text deltarget setdb setdb2 adddb targatelinkmode waittime"),
+    ("Duplicate checks", "disableduplicatescan enableduplicatescan scan4duplicates dupescan"),
+    ("Bypass and download settings", "bypass addbypass removebypass bypasslist domainbypass deldomain altbypass linkbutton removelinkbutton keepimages probebypass"),
+    ("DB2 caption cleanup", "avoid avoidtext removeavoid removegavoid replaceword removereplace"),
+    ("Bulk jobs", "replace deletetext massdlt massdlt_status massdlt_stop forward forward_status forward_stop forward_resume"),
+    ("Userbots, admins and diagnostics", "stats addworker removeworker invite leave add checkdm addadmin removeadmin checkram ping cancel help"),
+)
+
+
+def _help_pages():
+    descriptions = dict(_CMDS)
+    descriptions.update({
+        "disableduplicatescan": "List all targets and their check status. Add a target number to turn checks off.",
+        "enableduplicatescan": "Turn checks back on for the specified target number.",
+        "dupescan": "Rebuild a target’s DB2 duplicate index: /dupescan <n>.",
+        "scan4duplicates": "Manually find similar covers in a DB2 channel.",
+        "targets": "Show the target board and target numbers.",
+        "targets_text": "Show the same target numbers in a plain list.",
+        "pause": "Pause all targets, or use /pause <n> to pause one.",
+        "resume": "Resume all targets, or use /resume <n> to resume one.",
+        "waittime": "List timings or set a target delay: /waittime <n> <seconds>.",
+    })
+    blocks = ["BOT HELP\nQuick start: /targets lists channel numbers. /status shows what is running.\n"
+              "Duplicate checks: /disableduplicatescan lists status. "
+              "Use /disableduplicatescan 9 or /enableduplicatescan 9 to change target 9."]
+    seen = set()
+    for title, names in _HELP_SECTIONS:
+        names = [n for n in names.split() if n in descriptions]
+        seen.update(names)
+        blocks.append("\n".join([title.upper()] + [
+            f"/{n} — " + re.sub(r"^v[0-9.]+:\s*", "", descriptions[n]) for n in names]))
+    other = [f"/{n} — {d}" for n, d in _CMDS if n not in seen]
+    if other:
+        blocks.append("OTHER\n" + "\n".join(other))
+    return list(_line_pages([block + "\n" for block in blocks], limit=2750))
+
 
 _pending = {}  # user_id -> (kind, extra)
 
@@ -440,54 +496,50 @@ def register(scrape_client, sm=None):
     async def help_cmd(ev):
         if not await _admin(ev.sender_id):
             return
-        d = dict(_CMDS)
-        def L(name):
-            return f"/{name} — {d.get(name, '')}"
-        sections = [
-            # v40: regrouped — mirror the order things are used in
-            # v43.3: regrouped in workflow order
-            ("🎯 TARGETS & CHANNELS", ["target", "targatelinkmode", "waittime",
-                "targets", "targets_text", "setdb", "setdb2", "adddb", "deltarget"]),
-            ("🔐 BYPASS SETUP", ["bypass", "addbypass", "removebypass",
-                "bypasslist", "domainbypass", "deldomain", "altbypass"]),
-            ("🧼 CAPTION CLEANING (DB2)", ["keepimages", "avoid", "avoidtext",
-                "removeavoid", "removegavoid", "replaceword", "removereplace"]),
-            ("🔘 LINK-BOT BUTTONS", ["linkbutton", "removelinkbutton"]),
-            ("▶️ SCRAPING CONTROL", ["start", "pause", "resume", "skip",
-                "stop", "goto", "reset"]),
-            ("📊 MONITOR & SCAN", ["status", "current", "progress", "lastpost",
-                "scan4duplicates", "dupescan", "checkram"]),
-            ("🛠️ BULK JOBS", ["replace", "deletetext", "massdlt",
-                "massdlt_status", "massdlt_stop", "forward", "forward_status",
-                "forward_stop", "forward_resume"]),
-            ("👥 USERBOTS & ADMINS", ["stats", "addworker", "removeworker",
-                "invite", "leave", "add", "checkdm", "addadmin", "removeadmin"]),
-            ("ℹ️ MISC", ["help", "ping", "cancel", "probebypass"]),
-        ]
-        lines = ["📖 COMMANDS"]
-        shown = set()
-        for head, names in sections:
-            lines.append(f"\n{head}")
-            for n in names:
-                if n in d:
-                    lines.append(L(n))
-                    shown.add(n)
-        rest = [c for c, _ in _CMDS if c not in shown]
-        if rest:
-            lines.append("\nOTHER")
-            lines += [L(n) for n in rest]
-        lines.append("\nTips: /target walks you through channel + its DB channel. "
-                     "/goto accepts a message link (auto-picks the right target). "
-                     "Bare /pause pauses EVERYTHING (also /pause all); /pause 2 pauses "
-                     "ONLY target 2 (see /targets for numbers). Bare /resume resumes "
-                     "everything; /resume 2 resumes one target. "
-                     "When LINK_BOT renames its button: /linkbutton <new text> — "
-                     "active instantly, no restart. "
-                     "Caught-up channels re-scan for new posts every 30s.")
-        # v58: the command list outgrew Telegram's 4096-char cap — chunk it
-        txt = "\n".join(lines)
-        for k in range(0, len(txt), 3800):
-            await ev.reply(txt[k:k + 3800])
+        for page in _help_pages():
+            await ev.reply(page, parse_mode=None, link_preview=False)
+
+    @bot.on(events.NewMessage(pattern=r"^/(disable|enable)duplicatescan(?:\s+(.*))?\s*$"))
+    async def duplicate_scan_cmd(ev):
+        if not await _admin(ev.sender_id):
+            return
+        action, arg = ev.pattern_match.groups()
+        arg = (arg or "").strip()
+        targets = await DB.get_targets()
+        if not targets:
+            await ev.reply("No target channels. Add one with /target.", parse_mode=None)
+            return
+        if not arg and action == "disable":
+            lines = ["Automatic duplicate checks (same numbers as /targets)"]
+            for i, target in enumerate(targets, 1):
+                tid = target["id"]
+                title = await _chat_title(scrape_client, tid)
+                label = " ".join(title.split())[:200] if title else str(tid)
+                status = "OFF" if target.get("duplicate_scan_enabled") is False else "ON"
+                lines.append(f"{i}. {label} — {status}")
+            lines.extend(["", "Turn off: /disableduplicatescan 9", "Turn on: /enableduplicatescan 9"])
+            for page in _line_pages(lines):
+                await ev.reply(page, parse_mode=None, link_preview=False)
+            return
+        if not re.fullmatch(r"[0-9]{1,10}", arg) or not 1 <= int(arg) <= len(targets):
+            await ev.reply(f"Usage: /{action}duplicatescan <target number> — see /targets.",
+                           parse_mode=None)
+            return
+        n = int(arg)
+        tid = targets[n - 1]["id"]
+        enabled = action == "enable"
+        try:
+            saved = await DB.set_target_duplicate_scan(tid, enabled)
+        except Exception:
+            logging.getLogger("botapi").exception("Could not save duplicate policy for target %s", tid)
+            await ev.reply("Could not save the setting. Please try again.", parse_mode=None)
+            return
+        if not saved:
+            await ev.reply("That target is no longer listed. Check /targets and try again.", parse_mode=None)
+            return
+        status = "ON" if enabled else "OFF"
+        await ev.reply(f"Target {n} ({tid}): automatic duplicate checks {status}. "
+                       "Applies from the next scan pass. The duplicate index is kept.", parse_mode=None)
 
     # ---------- v39.1: /checkram — RAM usage ----------
     @bot.on(events.NewMessage(pattern=r"^/checkram$"))
@@ -2479,7 +2531,7 @@ def register(scrape_client, sm=None):
         await _save_simple(ev, kind, _parse_chat_id(ev.raw_text))
 
     # ---------- view ----------
-    @bot.on(events.NewMessage(pattern=r"^/targets(_text)?$"))
+    @bot.on(events.NewMessage(pattern=r"^/targ(?:et|ate)s(_text)?$"))
     async def targets_cmd(ev):
         if not await _admin(ev.sender_id):
             return

@@ -1,4 +1,20 @@
 ================================================================================
+v63 - PER-TARGET DUPLICATE CHECK SWITCH + CLEANER HELP
+================================================================================
+Files changed: bot.py, botapi.py, db.py (README.md, README_PATCH.txt updated).
+Deploy together and restart Render. No migration or environment change.
+
+/disableduplicatescan lists all targets with ON/OFF and /targets numbering.
+/disableduplicatescan 9 turns off target 9; /enableduplicatescan 9 restores it.
+Admin-only and saved per target. Existing and new targets default to ON.
+Changes apply on the next scan pass, not to already checked/queued posts.
+OFF skips exact-match and possible-duplicate checks in both worker modes.
+DB2 indexing and manual scans still work; toggling does not move the cursor,
+erase fingerprints, change other targets, or replay previously skipped posts.
+/help now starts with a quick guide and groups commands by task, without
+splitting a section between messages. The command menu includes both switches.
+
+================================================================================
 v62 - BYPASS REPLIES: TELEGRAM.ME ALIAS + VALID START-LINK MATCHING
 ================================================================================
 Files changed: flow.py, scraper.py (README.md, README_PATCH.txt updated).

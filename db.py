@@ -40,16 +40,17 @@ async def get_targets():
                         "link_trigger": t.get("link_trigger"),
                         # v59: seconds the bypassed link is held before being
                         # followed (0 = instant, the pre-v59 behavior)
-                        "wait_time": int(t.get("wait_time") or 0)})
+                        "wait_time": int(t.get("wait_time") or 0),
+                        "duplicate_scan_enabled": t.get("duplicate_scan_enabled") is not False})
         else:
             out.append({"id": t, "db_id": None, "paused": False, "db2_id": None,
                         "avoid": [], "link_mode": "button", "link_trigger": None,
-                        "wait_time": 0})
+                        "wait_time": 0, "duplicate_scan_enabled": True})
     out = [t for t in out if t["id"] is not None]
     if not out and doc.get("target_id"):
         out = [{"id": doc["target_id"], "db_id": doc.get("db_id"), "paused": False,
                 "db2_id": None, "avoid": [], "link_mode": "button",
-                "link_trigger": None, "wait_time": 0}]
+                "link_trigger": None, "wait_time": 0, "duplicate_scan_enabled": True}]
     return out
 
 async def _save_targets(targets):
@@ -79,7 +80,7 @@ async def add_target(tid, db_id=None, link_mode="button", link_trigger=None,
     targets.append({"id": tid, "db_id": db_id, "db2_id": None, "avoid": [],
                     "link_mode": link_mode or "button",
                     "link_trigger": link_trigger if link_mode in ("caption", "button") else None,  # v51
-                    "wait_time": int(wait_time or 0)})  # v59
+                    "wait_time": int(wait_time or 0), "duplicate_scan_enabled": True})  # v59
     return await _save_targets(targets)
 
 async def remove_target(tid):
@@ -127,6 +128,16 @@ async def set_target_wait_time(tid, seconds):
             t["wait_time"] = max(0, int(seconds))
             return await _save_targets(targets)
     return None  # target not found
+
+async def set_target_duplicate_scan(tid, enabled):
+    """Persist the target's pre-scrape duplicate policy, not its index."""
+    targets = await get_targets()
+    for t in targets:
+        if t["id"] == tid:
+            t["duplicate_scan_enabled"] = bool(enabled)
+            await _save_targets(targets)
+            return True
+    return False
 
 async def get_avoids(tid):
     for t in await get_targets():
